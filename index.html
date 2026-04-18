@@ -119,6 +119,13 @@
     .leaflet-control-zoom { border: none !important; }
     .leaflet-control-zoom a { background: rgba(13,13,26,0.85) !important; color: #fff !important; border: 1px solid var(--border) !important; }
     .leaflet-control-attribution { font-size: 10px !important; background: rgba(0,0,0,0.5) !important; color: #777 !important; }
+    #debug-log {
+      position: absolute; bottom: 220px; left: 8px; right: 8px;
+      background: rgba(0,0,0,0.82); color: #0f0; font-family: monospace;
+      font-size: 11px; padding: 6px 8px; border-radius: 8px;
+      max-height: 140px; overflow-y: auto; z-index: 950;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -139,6 +146,7 @@
 <div id="screen-nav" class="screen">
   <div id="map"></div>
   <button id="btn-recenter" onclick="recenter()">📍</button>
+  <div id="debug-log"></div>
   <div id="nav-panel">
     <div id="turn-primary">
       <div id="turn-arrow-wrap"><div id="turn-arrow">⬆</div></div>
@@ -344,6 +352,21 @@ let waypoints = [];
 let targetIdx = 0;   // 次に目指すウェイポイントの番号
 
 let announced = new Set(), voiceEnabled = true, followMode = true;
+let wakeLock = null;  // Screen Wake Lock
+
+// ── 画面ログ（デバッグ用） ───────────────────────────
+const MAX_LOG = 20;
+function dbgLog(msg) {
+  const el = document.getElementById('debug-log');
+  if (!el) return;
+  const t = new Date().toTimeString().slice(0,8);
+  const line = document.createElement('div');
+  line.textContent = `${t} ${msg}`;
+  el.appendChild(line);
+  while (el.children.length > MAX_LOG) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+}
 // 通過判定ステート（targetIdx が進むたびにリセット）
 let nearTarget    = false;
 let minDistTarget = Infinity;
@@ -437,13 +460,16 @@ function updateTargetMarker() {
     targetMarker = L.marker([wp.lat, wp.lon], { icon, zIndexOffset: 900 }).addTo(map);
   }
   targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${wp.name}`, { permanent: false });
-  console.log(`[TARGET] idx=${targetIdx}/${waypoints.length-1} "${wp.name}" isGoal=${wp.isGoal}`);
+  const statusText = `[${targetIdx}/${waypoints.length-1}] ${wp.name}`;
+  document.getElementById('nav-status').textContent = statusText;
+  dbgLog(`[TGT] ${targetIdx}/${waypoints.length-1} "${wp.name}" goal=${wp.isGoal}`);
 }
 
 // ── GPS ───────────────────────────────────────────────
 function startGPS() {
   if (!navigator.geolocation) { setNavMsg('⚠', 'GPS非対応', ''); return; }
   unlockAudio();
+  acquireWakeLock();  // ナビ開始時にスリープ防止
   watchId = navigator.geolocation.watchPosition(
     onGPSUpdate,
     () => { document.getElementById('nav-status').textContent = 'GPS取得中...'; },
@@ -476,9 +502,11 @@ function checkWaypointAdvance(lat, lon) {
     const dist = geoDist(lat, lon, wp.lat, wp.lon);
     const next = waypoints[targetIdx + 1];
 
-    // ゴールは NEAR_DIST 以内で即確定（逐次処理で全ターン後にしか来ない）
+    // ゴールは30m以内で確定。
+    // 逐次処理により全ターン通過後にしかここに到達しないため
+    // NEAR_DIST より大きい閾値を使ってよい（GPS誤差を吸収）。
     if (wp.isGoal) {
-      if (dist < NEAR_DIST) {
+      if (dist < 30) {
         setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
         speak('ゴールです。お疲れ様でした！');
         document.getElementById('turn-next').innerHTML =
@@ -495,18 +523,22 @@ function checkWaypointAdvance(lat, lon) {
 
     if (!nearTarget) {
       // まだ 10m 以内に入っていない
-      if (next) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
+      if (next && !next.isGoal) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
       break;
     }
 
     // ② 遠ざかりチェック
     if (dist <= minDistTarget + DEPART_M) {
-      if (next) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
+      if (next && !next.isGoal) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
       break;
     }
 
     // ③ 次wptへの接近チェック
-    if (next) {
+    // ただし次がゴールの場合はスキップ。
+    // 理由：周回コースではゴール＝スタート付近にあるため、
+    //       最後のターンを通過した直後は「ゴールから遠ざかる方向」に
+    //       なりやすく、条件③が永遠に満たされない。
+    if (next && !next.isGoal) {
       const dn = geoDist(lat, lon, next.lat, next.lon);
       if (dn >= prevDistNext) {
         // 次wptにも近づいていない
@@ -517,7 +549,7 @@ function checkWaypointAdvance(lat, lon) {
     }
 
     // ①②③ 全クリア → 通過確定
-    console.log(`[ARRIVE] "${wp.name}" minDist=${Math.round(minDistTarget)}m dist=${Math.round(dist)}m`);
+    dbgLog(`[ARRIVE] "${wp.name}" min=${Math.round(minDistTarget)}m d=${Math.round(dist)}m`);
     speak(`${wp.name}です`);
     targetIdx++;
     nearTarget = false; minDistTarget = Infinity; prevDistNext = Infinity;
@@ -567,7 +599,7 @@ function updateNavPanel(lat, lon) {
     if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
     if (dist <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
   }
-  console.log(`[NAV] target[${targetIdx}]="${wp.name}" dist=${Math.round(dist)}m`);
+  dbgLog(`[NAV] [${targetIdx}]"${wp.name}" d=${Math.round(dist)}m`);
 }
 
 function setNavMsg(arrow, dist, dir) {
@@ -580,6 +612,7 @@ function setNavMsg(arrow, dist, dir) {
 // 現在地から最も近いウェイポイント（ゴール含む）を次のターゲットに設定する
 function rerouteToNearest() {
   if (!currentRoute || !posMarker) return;
+  dbgLog(`[REROUTE] called, targetIdx was ${targetIdx}`);
   const pos = posMarker.getLatLng();
   let bestTI = 0, bestD = Infinity;
   for (let ti = 0; ti < waypoints.length; ti++) {
@@ -598,6 +631,40 @@ function recenter() {
   if (posMarker && map.hasLayer(posMarker))
     map.setView(posMarker.getLatLng(), Math.max(map.getZoom(), 15));
 }
+
+// ── Wake Lock ────────────────────────────────────────
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) {
+    dbgLog('[WAKE] Screen Wake Lock 非対応');
+    return;
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    dbgLog('[WAKE] スリープ防止 ON');
+    // バックグラウンドから復帰したとき自動で再取得
+    wakeLock.addEventListener('release', () => {
+      dbgLog('[WAKE] 解放 → 再取得試みます');
+    });
+  } catch (e) {
+    dbgLog(`[WAKE] 取得失敗: ${e.message}`);
+  }
+}
+
+async function releaseWakeLock() {
+  if (wakeLock) {
+    await wakeLock.release();
+    wakeLock = null;
+    dbgLog('[WAKE] スリープ防止 OFF');
+  }
+}
+
+// タブが再び表示されたとき（スリープ復帰など）にWake Lockを再取得
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && currentRoute && !watchId === false) {
+    dbgLog('[WAKE] 画面復帰 → Wake Lock 再取得');
+    await acquireWakeLock();
+  }
+});
 
 // ── Voice ─────────────────────────────────────────────
 function unlockAudio() {
@@ -626,6 +693,7 @@ function showScreen(name) {
 function goBackToList() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if ('speechSynthesis' in window) speechSynthesis.cancel();
+  releaseWakeLock();  // ナビ終了時にスリープ防止解除
   showScreen('list'); renderRouteList();
 }
 
