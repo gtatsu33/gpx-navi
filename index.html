@@ -176,10 +176,7 @@ const ANNOUNCE_100 = 100;
 const ANNOUNCE_AT  = 20;
 
 // 到達判定
-const ARRIVE_DIST  = 30;   // この距離(m)以内に入ったら到達とみなす
-const PASS_BUFFER  = 20;   // トラックインデックスでここまで通り過ぎたら強制到達とみなす
-const APPROACH_IDX = 100;  // ターゲットの何インデックス手前から到達チェックを有効にするか
-                           // ※周回コース対策：スタート時にゴールセンチネルへ即到達するのを防ぐ
+const ARRIVE_DIST = 30;   // この距離(m)以内に入ったら到達とみなす
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -501,8 +498,8 @@ function onGPSUpdate(pos) {
 //   ② geoDist < ARRIVE_DIST     → 30m以内に近づいた → 到達とみなして音声案内
 //
 // 判定ロジック（ゴールセンチネル）:
-//   周回コース対策: nearestIdx が末端付近（trackIdx - APPROACH_IDX 以内）に
-//   入ってから初めてチェック開始。これによりスタート直後の誤検知を防ぐ。
+//   ゴールセンチネルには while ループの順次処理でのみ到達する。
+//   ターンが1つでも残っている間はゴール判定に入らない。
 function checkWaypointAdvance(lat, lon) {
   let changed = false;
 
@@ -510,8 +507,15 @@ function checkWaypointAdvance(lat, lon) {
     const wp = waypoints[targetIdx];
 
     if (wp.isGoal) {
-      // ゴールは末端付近に来てから距離チェック（周回コース誤検知防止）
-      if (nearestIdx < wp.trackIdx - APPROACH_IDX) break;
+      // ゴール判定は「最後のターンポイントを通過してから」が前提。
+      // while ループの順次処理により、ターンが残っている間はここに到達しない。
+      //
+      // 例外：GPX に <wpt> が一切ない場合は waypoints=[goalOnly] で
+      //        targetIdx=0 から即ゴール候補になるため、
+      //        その場合のみ「トラック後半(50%超)」を条件に追加する。
+      const noTurns = (waypoints.length === 1);
+      if (noTurns && nearestIdx < Math.floor(currentRoute.track.length * 0.5)) break;
+
       if (geoDist(lat, lon, wp.lat, wp.lon) < ARRIVE_DIST) {
         setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
         speak('ゴールです。お疲れ様でした！');
