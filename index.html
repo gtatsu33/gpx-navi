@@ -176,7 +176,8 @@ const ANNOUNCE_100 = 100;
 const ANNOUNCE_AT  = 20;
 
 // 到達判定
-const ARRIVE_DIST = 30;   // この距離(m)以内に入ったら到達とみなす
+const NEAR_DIST  = 10;   // m: この距離以内で「接近フラグ」ON
+const DEPART_M   = 10;   // m: 最接近後これだけ遠ざかったら離脱とみなす
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -333,16 +334,20 @@ const TURN_STYLE = {
 const getTurnStyle = name => TURN_STYLE[name] || TURN_STYLE['直進維持'];
 
 // ── Navigation State ──────────────────────────────────
+// trkpt はマップ描画専用。ナビゲーションは wpt の座標だけで完結する。
+// trackIdx / nearestIdx / cumDist は一切使わない。
 let map = null, posMarker = null, targetMarker = null, currentRoute = null, watchId = null;
-let nearestIdx = 0;   // 現在地に最も近いトラックポイントのインデックス
-let cumDist = [];     // トラックの累積距離 [m]
 
-// waypoints[] : ターンポイント（トラック順にソート済み） + ゴールセンチネル
-// 各要素: { lat, lon, name, trackIdx, isGoal }
+// waypoints[] : wpt をGPX順（=ルート順）に並べたもの + ゴールセンチネル
+// 各要素: { lat, lon, name, isGoal }
 let waypoints = [];
-let targetIdx = 0;    // 次に目指すウェイポイントのインデックス
+let targetIdx = 0;   // 次に目指すウェイポイントの番号
 
 let announced = new Set(), voiceEnabled = true, followMode = true;
+// 通過判定ステート（targetIdx が進むたびにリセット）
+let nearTarget    = false;
+let minDistTarget = Infinity;
+let prevDistNext  = Infinity;
 
 // ── Navigation Start ──────────────────────────────────
 async function startNavigation(routeId) {
@@ -350,8 +355,10 @@ async function startNavigation(routeId) {
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
 
-  nearestIdx = 0;
-  announced  = new Set();
+  announced     = new Set();
+  nearTarget    = false;
+  minDistTarget = Infinity;
+  prevDistNext  = Infinity;
   followMode = true;
   voiceEnabled = true;
   document.getElementById('btn-voice').textContent = '🔊 音声';
@@ -359,37 +366,16 @@ async function startNavigation(routeId) {
 
   const track = currentRoute.track;
 
-  // 累積距離を計算
-  cumDist = [0];
-  for (let i = 1; i < track.length; i++)
-    cumDist.push(cumDist[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
-
-  // 各ターンをトラック上の最近傍インデックスにマッピング
-  const turnsWithIdx = currentRoute.turns.map(t => {
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < track.length; i++) {
-      const d = geoDist(t.lat, t.lon, track[i].lat, track[i].lon);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    return { lat: t.lat, lon: t.lon, name: t.name, trackIdx: best, isGoal: false };
-  });
-
-  // トラック進行順にソート
-  turnsWithIdx.sort((a, b) => a.trackIdx - b.trackIdx);
-
-  // 末尾にゴールをセンチネルとして追加
+  // ウェイポイント配列を構築：GPX順のターン + ゴールセンチネル
+  // trkpt へのマッピング不要。座標をそのまま使う。
   waypoints = [
-    ...turnsWithIdx,
-    {
-      lat: track[track.length - 1].lat,
-      lon: track[track.length - 1].lon,
-      name: 'ゴール',
-      trackIdx: track.length - 1,
-      isGoal: true,
-    }
+    ...currentRoute.turns.map(t => ({
+      lat: t.lat, lon: t.lon, name: t.name, isGoal: false
+    })),
+    { lat: track[track.length - 1].lat, lon: track[track.length - 1].lon,
+      name: 'ゴール', isGoal: true }
   ];
-
-  targetIdx = 0;  // 最初の目標は waypoints[0]（ターンがなければゴール）
+  targetIdx = 0;
 
   showScreen('nav');
   requestAnimationFrame(() => setTimeout(initMap, 50));
@@ -403,9 +389,14 @@ function initMap() {
   map = L.map('map', { zoomControl: true }).setView([track[0].lat, track[0].lon], 15);
   L.tileLayer(TILE_URL, { attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19, maxNativeZoom: 18 }).addTo(map);
 
+  // trkpt でルートを描画
   L.polyline(track.map(p => [p.lat, p.lon]), { color: '#00d4ff', weight: 5, opacity: 0.75 }).addTo(map);
-  L.marker([track[0].lat, track[0].lon], { icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>', iconSize:[22,22], iconAnchor:[11,11] }) }).bindTooltip('スタート').addTo(map);
-  L.marker([track[track.length-1].lat, track[track.length-1].lon], { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11] }) }).bindTooltip('ゴール').addTo(map);
+  L.marker([track[0].lat, track[0].lon],
+    { icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>', iconSize:[22,22], iconAnchor:[11,11] }) })
+    .bindTooltip('スタート').addTo(map);
+  L.marker([track[track.length-1].lat, track[track.length-1].lon],
+    { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11] }) })
+    .bindTooltip('ゴール').addTo(map);
 
   // ターンポイントをマップに描画（ゴールセンチネルは除く）
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
@@ -424,14 +415,11 @@ function initMap() {
   map.on('dragstart', () => { followMode = false; });
   map.fitBounds(L.polyline(track.map(p=>[p.lat,p.lon])).getBounds(), { padding:[30,30] });
 
-  // 初期ターゲットマーカーを表示（GPS取得前でも見える）
   updateTargetMarker();
-
   startGPS();
 }
 
 // ── 現在ターゲットに旗マーカーを表示 ─────────────────
-// targetIdx が変わるたびに呼ぶ。位置のズレのデバッグにも有用。
 function updateTargetMarker() {
   if (!map) return;
   if (targetIdx >= waypoints.length) {
@@ -441,20 +429,15 @@ function updateTargetMarker() {
   const wp = waypoints[targetIdx];
   const icon = L.divIcon({
     html: `<div style="font-size:28px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.8))">${wp.isGoal ? '🏁' : '🚩'}</div>`,
-    iconSize: [28, 28],
-    iconAnchor: [4, 28],
-    className: ''
+    iconSize: [28, 28], iconAnchor: [4, 28], className: ''
   });
   if (targetMarker) {
     targetMarker.setLatLng([wp.lat, wp.lon]).setIcon(icon);
   } else {
     targetMarker = L.marker([wp.lat, wp.lon], { icon, zIndexOffset: 900 }).addTo(map);
   }
-  targetMarker.bindTooltip(
-    `🎯 目標[${targetIdx}]: ${wp.name} (trk=${wp.trackIdx})`,
-    { permanent: false }
-  );
-  console.log(`[TARGET] idx=${targetIdx}/${waypoints.length-1} "${wp.name}" trackIdx=${wp.trackIdx} isGoal=${wp.isGoal}`);
+  targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${wp.name}`, { permanent: false });
+  console.log(`[TARGET] idx=${targetIdx}/${waypoints.length-1} "${wp.name}" isGoal=${wp.isGoal}`);
 }
 
 // ── GPS ───────────────────────────────────────────────
@@ -474,49 +457,28 @@ function onGPSUpdate(pos) {
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
-
-  // 現在地に最も近いトラックポイントを窓探索で更新
-  // （前後の小窓だけ見ることで、周回コースでゴール付近のポイントに
-  //   誤って引き寄せられるのを防ぐ）
-  const track = currentRoute.track;
-  let best = nearestIdx, bestD = Infinity;
-  for (let i = Math.max(0, nearestIdx - 5); i <= Math.min(track.length - 1, nearestIdx + 40); i++) {
-    const d = geoDist(lat, lon, track[i].lat, track[i].lon);
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  nearestIdx = best;
-
   updateNavPanel(lat, lon);
 }
 
 // ── ウェイポイント到達チェック ────────────────────────
-// while ループで「すでに通り過ぎたウェイポイント」を順次スキップし、
-// 現在の目標を常に「まだ到達していない最初のウェイポイント」に保つ。
+// 判定ロジック（ターンポイント）：
+//   ① dist < NEAR_DIST(10m)         → 接近フラグON・最近接距離を更新
+//   ② 接近後 dist > 最近接 + DEPART_M → 遠ざかり始めた
+//   ③ 次wptへの距離 < 前回値          → 次wptに近づいている
+//   ①②③ 全クリアで通過確定（次wptなしなら③省略）
 //
-// 判定ロジック（ターンポイント）:
-//   ① nearestIdx > wp.trackIdx  → トラック上でそのポイントを通り過ぎた → 自動スキップ
-//   ② geoDist < ARRIVE_DIST     → 30m以内に近づいた → 到達とみなして音声案内
-//
-// 判定ロジック（ゴールセンチネル）:
-//   ゴールセンチネルには while ループの順次処理でのみ到達する。
-//   ターンが1つでも残っている間はゴール判定に入らない。
+// 逐次処理により「全ターン通過後のみゴール判定」が自然に実現する。
 function checkWaypointAdvance(lat, lon) {
   let changed = false;
 
   while (targetIdx < waypoints.length) {
-    const wp = waypoints[targetIdx];
+    const wp   = waypoints[targetIdx];
+    const dist = geoDist(lat, lon, wp.lat, wp.lon);
+    const next = waypoints[targetIdx + 1];
 
+    // ゴールは NEAR_DIST 以内で即確定（逐次処理で全ターン後にしか来ない）
     if (wp.isGoal) {
-      // ゴール判定は「最後のターンポイントを通過してから」が前提。
-      // while ループの順次処理により、ターンが残っている間はここに到達しない。
-      //
-      // 例外：GPX に <wpt> が一切ない場合は waypoints=[goalOnly] で
-      //        targetIdx=0 から即ゴール候補になるため、
-      //        その場合のみ「トラック後半(50%超)」を条件に追加する。
-      const noTurns = (waypoints.length === 1);
-      if (noTurns && nearestIdx < Math.floor(currentRoute.track.length * 0.5)) break;
-
-      if (geoDist(lat, lon, wp.lat, wp.lon) < ARRIVE_DIST) {
+      if (dist < NEAR_DIST) {
         setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
         speak('ゴールです。お疲れ様でした！');
         document.getElementById('turn-next').innerHTML =
@@ -524,27 +486,42 @@ function checkWaypointAdvance(lat, lon) {
         targetIdx++;
         changed = true;
       }
-      break; // ゴールはスキップしない
+      break;
     }
 
-    // ① トラック上で通り過ぎた → スキップ（距離計算が負になる根本原因を防ぐ）
-    if (nearestIdx > wp.trackIdx) {
-      console.log(`[SKIP] "${wp.name}" trackIdx=${wp.trackIdx} nearestIdx=${nearestIdx}`);
-      targetIdx++;
-      changed = true;
-      continue;
+    // ① 最近接距離更新・接近フラグ
+    if (dist < minDistTarget) minDistTarget = dist;
+    if (dist < NEAR_DIST)     nearTarget    = true;
+
+    if (!nearTarget) {
+      // まだ 10m 以内に入っていない
+      if (next) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
+      break;
     }
 
-    // ② 30m以内に入った → 到達
-    if (geoDist(lat, lon, wp.lat, wp.lon) < ARRIVE_DIST) {
-      console.log(`[ARRIVE] "${wp.name}" dist=${Math.round(geoDist(lat, lon, wp.lat, wp.lon))}m`);
-      speak(`${wp.name}です`);
-      targetIdx++;
-      changed = true;
-      continue;
+    // ② 遠ざかりチェック
+    if (dist <= minDistTarget + DEPART_M) {
+      if (next) prevDistNext = geoDist(lat, lon, next.lat, next.lon);
+      break;
     }
 
-    break; // まだ到達していない → ループ終了
+    // ③ 次wptへの接近チェック
+    if (next) {
+      const dn = geoDist(lat, lon, next.lat, next.lon);
+      if (dn >= prevDistNext) {
+        // 次wptにも近づいていない
+        prevDistNext = dn;
+        break;
+      }
+      prevDistNext = dn;
+    }
+
+    // ①②③ 全クリア → 通過確定
+    console.log(`[ARRIVE] "${wp.name}" minDist=${Math.round(minDistTarget)}m dist=${Math.round(dist)}m`);
+    speak(`${wp.name}です`);
+    targetIdx++;
+    nearTarget = false; minDistTarget = Infinity; prevDistNext = Infinity;
+    changed = true;
   }
 
   if (changed) updateTargetMarker();
@@ -552,38 +529,26 @@ function checkWaypointAdvance(lat, lon) {
 
 // ── パネル更新 ────────────────────────────────────────
 function updateNavPanel(lat, lon) {
-  // 到達チェック（必要なら targetIdx を進める）
   checkWaypointAdvance(lat, lon);
-
-  // ナビ完了済み
   if (targetIdx >= waypoints.length) return;
 
-  const track = currentRoute.track;
-  const wp    = waypoints[targetIdx];
-  const s     = wp.isGoal ? getTurnStyle('直進維持') : getTurnStyle(wp.name);
-
-  // トラック上の累積距離で目標までの距離を算出
-  // ※ checkWaypointAdvance で nearestIdx <= wp.trackIdx を保証しているので
-  //   cumDist[wp.trackIdx] - cumDist[nearestIdx] は必ず 0 以上になる
-  const distToTarget =
-    geoDist(lat, lon, track[nearestIdx].lat, track[nearestIdx].lon) +
-    cumDist[wp.trackIdx] - cumDist[nearestIdx];
-
-  // デバッグ用ログ（毎回出すと多いのでコメントアウト可）
-  console.log(`[NAV] nearestIdx=${nearestIdx} target[${targetIdx}]="${wp.name}"(trk=${wp.trackIdx}) dist=${Math.round(distToTarget)}m`);
+  const wp = waypoints[targetIdx];
+  const s  = wp.isGoal ? getTurnStyle('直進維持') : getTurnStyle(wp.name);
+  // trkpt 不使用。GPS座標から wpt への直線距離で表示。
+  const dist = geoDist(lat, lon, wp.lat, wp.lon);
 
   document.getElementById('turn-arrow-wrap').style.background = s.bg;
   document.getElementById('turn-arrow').textContent           = s.arrow;
   document.getElementById('turn-arrow').style.color           = s.color;
-  document.getElementById('turn-distance').textContent        = formatDist(distToTarget);
+  document.getElementById('turn-distance').textContent        = formatDist(dist);
   document.getElementById('turn-distance').style.color        = s.color;
   document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${wp.name}`;
 
   // 次のウェイポイント情報
   const next = waypoints[targetIdx + 1];
   if (next && !wp.isGoal) {
-    const ns = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(next.name);
-    const nd = Math.max(0, cumDist[next.trackIdx] - cumDist[nearestIdx]);
+    const ns  = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(next.name);
+    const nd  = geoDist(lat, lon, next.lat, next.lon);
     document.getElementById('turn-next').innerHTML = next.isGoal
       ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
       : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${next.name}</span><span class="next-val">　${formatDist(nd)}先</span>`;
@@ -595,13 +560,14 @@ function updateNavPanel(lat, lon) {
   // 音声案内
   const k300 = `${targetIdx}-300`, k100 = `${targetIdx}-100`, k0 = `${targetIdx}-0`;
   if (wp.isGoal) {
-    if (distToTarget <= ANNOUNCE_300 && !announced.has(k300)) { speak('300メートル先、ゴールです');  announced.add(k300); }
-    if (distToTarget <= ANNOUNCE_100 && !announced.has(k100)) { speak('まもなくゴールです');         announced.add(k100); }
+    if (dist <= ANNOUNCE_300 && !announced.has(k300)) { speak('300メートル先、ゴールです');  announced.add(k300); }
+    if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak('まもなくゴールです');         announced.add(k100); }
   } else {
-    if (distToTarget <= ANNOUNCE_300 && !announced.has(k300)) { speak(`300メートル先、${wp.name}です`); announced.add(k300); }
-    if (distToTarget <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
-    if (distToTarget <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
+    if (dist <= ANNOUNCE_300 && !announced.has(k300)) { speak(`300メートル先、${wp.name}です`); announced.add(k300); }
+    if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
+    if (dist <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
   }
+  console.log(`[NAV] target[${targetIdx}]="${wp.name}" dist=${Math.round(dist)}m`);
 }
 
 function setNavMsg(arrow, dist, dir) {
@@ -611,20 +577,16 @@ function setNavMsg(arrow, dist, dir) {
 }
 
 // ── 復帰ボタン ────────────────────────────────────────
-// 現在地から最も近いウェイポイントを次のターゲットに設定する
+// 現在地から最も近いウェイポイント（ゴール含む）を次のターゲットに設定する
 function rerouteToNearest() {
   if (!currentRoute || !posMarker) return;
   const pos = posMarker.getLatLng();
-
   let bestTI = 0, bestD = Infinity;
   for (let ti = 0; ti < waypoints.length; ti++) {
     const d = geoDist(pos.lat, pos.lng, waypoints[ti].lat, waypoints[ti].lon);
     if (d < bestD) { bestD = d; bestTI = ti; }
   }
-
-  targetIdx  = bestTI;
-  nearestIdx = Math.max(0, waypoints[bestTI].trackIdx - 20);
-
+  targetIdx = bestTI;
   updateTargetMarker();
   showToast(`「${waypoints[bestTI].name}」へ復帰（${Math.round(bestD)}m先）`);
   updateNavPanel(pos.lat, pos.lng);
