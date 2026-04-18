@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0d0d1a">
+  <title>GPX ナビ</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700;900&family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <style>
+    /* ── Reset & Base ──────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    :root {
+      --bg:        #0d0d1a;
+      --panel:     #131328;
+      --border:    #1e1e3f;
+      --accent:    #00d4ff;
+      --right:     #ff4757;
+      --left:      #1e90ff;
+      --slight:    #ffa502;
+      --go:        #2ed573;
+      --text:      #f0f0f0;
+      --muted:     #666;
+      --font-num:  'Barlow', sans-serif;
+      --font-jp:   'Noto Sans JP', sans-serif;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font-jp); overflow: hidden; }
+
+    /* ── Screens ───────────────────────────────── */
+    .screen { display: none; height: 100dvh; height: 100vh; flex-direction: column; }
+    .screen.active { display: flex; }
+
+    /* ══════════════════════════════════════════════
+       LIST SCREEN
+    ══════════════════════════════════════════════ */
+    #screen-list { background: var(--bg); overflow-y: auto; }
+
+    .list-header {
+      padding: 20px 20px 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .list-header h1 {
+      font-family: var(--font-num);
+      font-size: 24px;
+      font-weight: 900;
+      letter-spacing: -0.5px;
+      color: var(--accent);
+    }
+    .list-header h1 span { color: var(--text); }
+
+    .btn-add {
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      border-radius: 10px;
+      padding: 10px 18px;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: var(--font-jp);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .list-body { padding: 16px 20px 30px; flex: 1; }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+    }
+    .empty-state .empty-icon { font-size: 52px; margin-bottom: 16px; }
+    .empty-state p { font-size: 16px; line-height: 1.7; }
+
+    .route-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 18px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .route-card:active { background: #1a1a35; }
+    .route-icon { font-size: 32px; flex-shrink: 0; }
+    .route-info { flex: 1; min-width: 0; }
+    .route-name {
+      font-size: 17px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .route-meta {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .route-meta span {
+      color: var(--accent);
+      font-family: var(--font-num);
+      font-weight: 600;
+    }
+    .btn-delete {
+      background: none;
+      border: 1px solid #333;
+      color: #666;
+      border-radius: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .btn-delete:active { background: #2a0000; border-color: var(--right); color: var(--right); }
+
+    #import-progress {
+      margin: 12px 20px;
+      padding: 12px 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      display: none;
+    }
+    .progress-bar-wrap {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    /* ══════════════════════════════════════════════
+       NAV SCREEN
+    ══════════════════════════════════════════════ */
+    #screen-nav { position: relative; }
+
+    #map {
+      flex: 1;
+      min-height: 0;
+      z-index: 1;
+    }
+
+    /* ── ナビパネル ─────────────────────────────── */
+    #nav-panel {
+      flex-shrink: 0;
+      background: var(--panel);
+      border-top: 2px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 36vh;
+      min-height: 190px;
+      max-height: 260px;
+    }
+
+    /* 主ターン表示 */
+    #turn-primary {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      padding: 10px 16px;
+      gap: 12px;
+      min-height: 0;
+      overflow: hidden;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #turn-arrow-wrap {
+      width: 76px;
+      height: 76px;
+      border-radius: 14px;
+      background: var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    #turn-arrow {
+      font-size: 44px;
+      line-height: 1;
+      user-select: none;
+    }
+
+    #turn-info { flex: 1; min-width: 0; }
+    #turn-distance {
+      font-family: var(--font-num);
+      font-size: 40px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -1px;
+      white-space: nowrap;
+    }
+    #turn-direction {
+      font-size: 18px;
+      font-weight: 700;
+      margin-top: 2px;
+      color: #bbb;
+    }
+
+    /* 次ターン */
+    #turn-next {
+      padding: 7px 16px;
+      font-size: 13px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      flex-shrink: 0;
+    }
+    #turn-next .next-label { color: #555; }
+    #turn-next .next-val   { color: #aaa; }
+
+    /* コントロール行 */
+    #nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      flex-shrink: 0;
+    }
+    .ctrl-btn {
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      border-radius: 9px;
+      padding: 9px 14px;
+      font-size: 14px;
+      font-family: var(--font-jp);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    .ctrl-btn:active { opacity: 0.7; }
+    #btn-voice.muted { color: var(--muted); }
+
+    #nav-status {
+      flex: 1;
+      text-align: right;
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--font-num);
+    }
+
+    /* ── リセンター ─────────────────────────────── */
+    #btn-recenter {
+      position: absolute;
+      right: 14px;
+      top: 14px;
+      z-index: 900;
+      background: rgba(13,13,26,0.85);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 18px;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+    }
+
+    /* ── Toast ──────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 120px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.85);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      z-index: 9999;
+      display: none;
+      max-width: 85vw;
+      text-align: center;
+      backdrop-filter: blur(4px);
+    }
+
+    /* ── Leaflet overrides ──────────────────────── */
+    .leaflet-control-zoom { border: none !important; }
+    .leaflet-control-zoom a {
+      background: rgba(13,13,26,0.85) !important;
+      color: #fff !important;
+      border: 1px solid var(--border) !important;
+      backdrop-filter: blur(4px);
+    }
+    .leaflet-control-attribution {
+      font-size: 10px !important;
+      background: rgba(0,0,0,0.5) !important;
+      color: #777 !important;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══ SCREEN: ルート一覧 ══ -->
+<div id="screen-list" class="screen active">
+  <div class="list-header">
+    <h1>GPX <span>ナビ</span></h1>
+    <button class="btn-add" onclick="openFilePicker()">＋ ルート追加</button>
+  </div>
+
+  <div id="import-progress">
+    <span id="import-msg">⏳ インポート中...</span>
+    <div class="progress-bar-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+  </div>
+
+  <div class="list-body" id="route-list-container"></div>
+
+  <input type="file" id="file-input" accept=".gpx" style="display:none" onchange="handleFileImport(event)">
+</div>
+
+<!-- ══ SCREEN: ナビゲーション ══ -->
+<div id="screen-nav" class="screen">
+  <div id="map"></div>
+
+  <button id="btn-recenter" onclick="recenter()" title="現在地へ">📍</button>
+
+  <div id="nav-panel">
+    <div id="turn-primary">
+      <div id="turn-arrow-wrap">
+        <div id="turn-arrow">⬆</div>
+      </div>
+      <div id="turn-info">
+        <div id="turn-distance">GPS待機中</div>
+        <div id="turn-direction">—</div>
+      </div>
+    </div>
+    <div id="turn-next"><span class="next-label">次：</span><span class="next-val">—</span></div>
+    <div id="nav-controls">
+      <button class="ctrl-btn" onclick="goBackToList()">← 一覧</button>
+      <button class="ctrl-btn" id="btn-voice" onclick="toggleVoice()">🔊 音声</button>
+      <div id="nav-status">—</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+'use strict';
+
+// ══════════════════════════════════════════════
+// CONFIG
+// ══════════════════════════════════════════════
+const DB_NAME    = 'gpxnav-db';
+const DB_VERSION = 1;
+const STORE      = 'routes';
+const TILE_URL   = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+const PREFETCH_ZOOMS   = [13, 14, 15];
+const ANNOUNCE_300 = 300;
+const ANNOUNCE_100 = 100;
+const ANNOUNCE_AT  = 20;
+
+// ══════════════════════════════════════════════
+// INDEXEDDB
+// ══════════════════════════════════════════════
+let db;
+
+function openDB() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e =>
+      e.target.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+    req.onsuccess = e => { db = e.target.result; res(db); };
+    req.onerror   = e => rej(e);
+  });
+}
+
+const dbTx = (mode, fn) => new Promise((res, rej) => {
+  const tx = db.transaction(STORE, mode);
+  const store = tx.objectStore(STORE);
+  const req = fn(store);
+  req.onsuccess = e => res(e.target.result);
+  req.onerror   = rej;
+});
+
+const dbSave   = route  => dbTx('readwrite', s => s.add(route));
+const dbGetAll = ()     => dbTx('readonly',  s => s.getAll());
+const dbDelete = id     => dbTx('readwrite', s => s.delete(id));
+
+// ══════════════════════════════════════════════
+// GPX PARSER
+// ══════════════════════════════════════════════
+function parseGPX(text) {
+  const doc = new DOMParser().parseFromString(text, 'text/xml');
+  const NS  = 'http://www.topografix.com/GPX/1/1';
+
+  // 名前空間あり・なし両方に対応して要素取得
+  const getEls = (parent, tag) => [
+    ...parent.getElementsByTagNameNS(NS, tag),
+    ...parent.getElementsByTagName(tag),
+  ];
+  const getText = (parent, tag) => {
+    const el = getEls(parent, tag)[0];
+    return el ? el.textContent.trim() : '';
+  };
+
+  // ルート名（<name> or <n> どちらも対応）
+  const name = getText(doc, 'name') || getText(doc, 'n') || 'ルート';
+
+  // トラックポイント（連続する重複点のみ除去）
+  const trkptEls = getEls(doc, 'trkpt');
+  const track = [];
+  let prevKey = null;
+  for (const el of trkptEls) {
+    const lat = parseFloat(el.getAttribute('lat'));
+    const lon = parseFloat(el.getAttribute('lon'));
+    if (isNaN(lat) || isNaN(lon)) continue;
+    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+    if (key === prevKey) continue;   // 直前と同じ点のみスキップ
+    prevKey = key;
+    track.push({ lat, lon });
+  }
+
+  // ウェイポイント（ターン）
+  const wptEls = getEls(doc, 'wpt');
+  const turns = wptEls.map(el => {
+    const lat  = parseFloat(el.getAttribute('lat'));
+    const lon  = parseFloat(el.getAttribute('lon'));
+    const name = getText(el, 'name') || getText(el, 'n') || '通過点';
+    return { lat, lon, name };
+  }).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
+
+  return { name, track, turns };
+}
+
+// ══════════════════════════════════════════════
+// GEO UTILS
+// ══════════════════════════════════════════════
+function geoDist(lat1, lon1, lat2, lon2) {
+  const R  = 6371000;
+  const dL = (lat2 - lat1) * Math.PI / 180;
+  const dN = (lon2 - lon1) * Math.PI / 180;
+  const a  = Math.sin(dL/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dN/2)**2;
+  return R * 2 * Math.asin(Math.sqrt(Math.min(1, a)));
+}
+
+function formatDist(m) {
+  return m >= 1000 ? `${(m / 1000).toFixed(1)}km` : `${Math.round(m)}m`;
+}
+
+// タイルXY計算（プリフェッチ用）
+function latLonToTile(lat, lon, z) {
+  const n = 2 ** z;
+  const x = Math.floor((lon + 180) / 360 * n);
+  const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI/180) + 1/Math.cos(lat * Math.PI/180)) / Math.PI) / 2 * n);
+  return { x, y };
+}
+
+// ══════════════════════════════════════════════
+// TILE PREFETCH（オフライン用）
+// ══════════════════════════════════════════════
+async function prefetchTiles(track, onProgress) {
+  if (!('caches' in window)) { onProgress && onProgress(1, 1); return; }
+
+  // ルート上の点からタイルIDを収集（隣接1タイルも含む）
+  const tileSet = new Set();
+  const step = Math.max(1, Math.floor(track.length / 150));
+  for (let i = 0; i < track.length; i += step) {
+    const { lat, lon } = track[i];
+    for (const z of PREFETCH_ZOOMS) {
+      const { x, y } = latLonToTile(lat, lon, z);
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++)
+          tileSet.add(`${z}/${x + dx}/${y + dy}`);
+    }
+  }
+
+  const tiles = [...tileSet];
+  const cache = await caches.open('gpxnav-tiles-v1');
+  let done = 0;
+
+  for (const tile of tiles) {
+    const url = `https://tile.openstreetmap.org/${tile}.png`;
+    try {
+      if (!await cache.match(url)) {
+        const res = await fetch(url, { mode: 'cors' });
+        if (res.ok) await cache.put(url, res);
+      }
+    } catch {}
+    done++;
+    onProgress && onProgress(done, tiles.length);
+    // OSM利用規約: 過剰アクセス防止
+    await new Promise(r => setTimeout(r, 50));
+  }
+}
+
+// ══════════════════════════════════════════════
+// LIST SCREEN
+// ══════════════════════════════════════════════
+function openFilePicker() {
+  document.getElementById('file-input').click();
+}
+
+async function handleFileImport(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  event.target.value = '';
+
+  let text;
+  try { text = await file.text(); }
+  catch { showToast('ファイル読み込み失敗'); return; }
+
+  const parsed = parseGPX(text);
+  if (parsed.track.length < 2) {
+    showToast('GPXの解析に失敗しました');
+    return;
+  }
+
+  // 総距離
+  let totalDist = 0;
+  for (let i = 1; i < parsed.track.length; i++) {
+    totalDist += geoDist(parsed.track[i-1].lat, parsed.track[i-1].lon,
+                         parsed.track[i].lat,   parsed.track[i].lon);
+  }
+
+  const route = {
+    name:  parsed.name,
+    distKm: (totalDist / 1000).toFixed(1),
+    track:  parsed.track,
+    turns:  parsed.turns,
+    importedAt: Date.now(),
+  };
+
+  await dbSave(route);
+  await renderRouteList();
+
+  // タイルキャッシュ（バックグラウンド）
+  const prog = document.getElementById('import-progress');
+  const msg  = document.getElementById('import-msg');
+  const bar  = document.getElementById('progress-bar');
+  prog.style.display = 'block';
+
+  prefetchTiles(parsed.track, (done, total) => {
+    const pct = Math.round(done / total * 100);
+    msg.textContent = `📡 オフライン用タイルキャッシュ中... ${pct}%`;
+    bar.style.width  = pct + '%';
+  }).then(() => {
+    prog.style.display = 'none';
+    showToast('キャッシュ完了 — オフライン走行可能です');
+  }).catch(() => {
+    prog.style.display = 'none';
+  });
+
+  showToast(`「${route.name}」を追加 (${parsed.turns.length}ターン)`);
+}
+
+async function renderRouteList() {
+  const routes = await dbGetAll();
+  const el = document.getElementById('route-list-container');
+
+  if (routes.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🗺️</div>
+        <p>ルートがありません<br>「＋ ルート追加」から<br>GPXファイルを読み込んでください</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = routes.reverse().map(r => `
+    <div class="route-card" onclick="startNavigation(${r.id})">
+      <div class="route-icon">🚴</div>
+      <div class="route-info">
+        <div class="route-name">${escHtml(r.name)}</div>
+        <div class="route-meta">
+          <span>${r.distKm} km</span> &nbsp;|&nbsp;
+          ターン ${r.turns.length}件
+        </div>
+      </div>
+      <button class="btn-delete"
+        onclick="event.stopPropagation(); deleteRoute(${r.id})">削除</button>
+    </div>
+  `).join('');
+}
+
+async function deleteRoute(id) {
+  if (!confirm('このルートを削除しますか？')) return;
+  await dbDelete(id);
+  await renderRouteList();
+}
+
+const escHtml = s => s.replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ══════════════════════════════════════════════
+// NAVIGATION
+// ══════════════════════════════════════════════
+let map = null, posMarker = null;
+let currentRoute = null;
+let watchId      = null;
+let nearestIdx   = 0;
+let cumDist      = [];      // 累積距離配列
+let turnTrackIdx = [];      // 各ターンのtrack index
+let announced    = new Set();
+let voiceEnabled = true;
+let followMode   = true;
+
+// ターン情報テーブル
+const TURN_STYLE = {
+  '右折':     { arrow: '⇒', color: 'var(--right)',  bg: '#2a0808' },
+  '左折':     { arrow: '⇐', color: 'var(--left)',   bg: '#08112a' },
+  'やや右':   { arrow: '↗', color: 'var(--slight)', bg: '#2a1a08' },
+  'やや左':   { arrow: '↖', color: 'var(--slight)', bg: '#1a082a' },
+  '直進維持': { arrow: '⬆', color: 'var(--go)',     bg: '#082a14' },
+};
+
+function getTurnStyle(name) {
+  return TURN_STYLE[name] || TURN_STYLE['直進維持'];
+}
+
+async function startNavigation(routeId) {
+  const routes = await dbGetAll();
+  currentRoute = routes.find(r => r.id === routeId);
+  if (!currentRoute) return;
+
+  // 状態リセット
+  nearestIdx   = 0;
+  announced    = new Set();
+  followMode   = true;
+  voiceEnabled = true;
+  document.getElementById('btn-voice').textContent = '🔊 音声';
+  document.getElementById('btn-voice').classList.remove('muted');
+
+  // 累積距離を事前計算
+  const track = currentRoute.track;
+  cumDist = [0];
+  for (let i = 1; i < track.length; i++) {
+    cumDist.push(cumDist[i-1] + geoDist(
+      track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
+  }
+
+  // 各ターンのtrack indexを事前計算
+  turnTrackIdx = currentRoute.turns.map(t => {
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < track.length; i++) {
+      const d = geoDist(t.lat, t.lon, track[i].lat, track[i].lon);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  });
+
+  showScreen('nav');
+
+  // DOM描画後に地図初期化
+  requestAnimationFrame(() => setTimeout(initMap, 50));
+}
+
+function initMap() {
+  if (map) { map.remove(); map = null; }
+
+  const track  = currentRoute.track;
+  const center = track[0];
+
+  map = L.map('map', { zoomControl: true, attributionControl: true })
+          .setView([center.lat, center.lon], 15);
+
+  L.tileLayer(TILE_URL, {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+    maxNativeZoom: 18,
+  }).addTo(map);
+
+  // ルートポリライン
+  L.polyline(track.map(p => [p.lat, p.lon]),
+    { color: '#00d4ff', weight: 5, opacity: 0.75 }).addTo(map);
+
+  // スタート・ゴール
+  L.marker([track[0].lat, track[0].lon], {
+    icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>',
+                      iconSize: [22,22], iconAnchor: [11,11] })
+  }).bindTooltip('スタート').addTo(map);
+
+  L.marker([track[track.length-1].lat, track[track.length-1].lon], {
+    icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>',
+                      iconSize: [22,22], iconAnchor: [11,11] })
+  }).bindTooltip('ゴール').addTo(map);
+
+  // ターンマーカー
+  currentRoute.turns.forEach((t, i) => {
+    const s = getTurnStyle(t.name);
+    L.circleMarker([t.lat, t.lon], {
+      radius: 7, color: s.color, fillColor: s.color, fillOpacity: 0.9, weight: 2,
+    }).bindTooltip(`${i+1}. ${s.arrow} ${t.name}`).addTo(map);
+  });
+
+  // 現在地マーカー
+  posMarker = L.marker([center.lat, center.lon], {
+    icon: L.divIcon({
+      html: `<div style="width:18px;height:18px;
+               background:#ff4757;border:3px solid #fff;
+               border-radius:50%;box-shadow:0 2px 8px rgba(255,71,87,0.6)"></div>`,
+      iconSize: [18, 18], iconAnchor: [9, 9],
+    }),
+    zIndexOffset: 1000,
+  });
+
+  // 地図タップで追従モードOFF
+  map.on('dragstart', () => { followMode = false; });
+
+  map.fitBounds(L.polyline(track.map(p => [p.lat, p.lon])).getBounds(),
+                { padding: [30, 30] });
+
+  startGPS();
+}
+
+function startGPS() {
+  if (!navigator.geolocation) {
+    setNavPanelMessage('GPS非対応', '—');
+    return;
+  }
+  // iOSで音声を有効化（ユーザージェスチャー起点として）
+  unlockAudio();
+
+  watchId = navigator.geolocation.watchPosition(
+    onGPSUpdate,
+    err => {
+      document.getElementById('nav-status').textContent = 'GPS取得中...';
+    },
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 }
+  );
+}
+
+function onGPSUpdate(pos) {
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const acc = Math.round(pos.coords.accuracy);
+
+  // マーカー更新
+  posMarker.setLatLng([lat, lon]);
+  if (!map.hasLayer(posMarker)) posMarker.addTo(map);
+  if (followMode) map.setView([lat, lon], map.getZoom());
+
+  document.getElementById('nav-status').textContent = `±${acc}m`;
+
+  // 最近傍点の更新（前後探索）
+  const track = currentRoute.track;
+  const from  = Math.max(0, nearestIdx - 5);
+  const to    = Math.min(track.length - 1, nearestIdx + 40);
+  let best = nearestIdx, bestD = Infinity;
+  for (let i = from; i <= to; i++) {
+    const d = geoDist(lat, lon, track[i].lat, track[i].lon);
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  nearestIdx = best;
+
+  updateNavPanel(lat, lon);
+}
+
+function updateNavPanel(lat, lon) {
+  const track = currentRoute.track;
+  const turns = currentRoute.turns;
+
+  // ゴール到達チェック
+  const goalDist = geoDist(lat, lon,
+    track[track.length-1].lat, track[track.length-1].lon);
+  if (goalDist < 30 && nearestIdx > track.length * 0.8) {
+    setNavPanelMessage('🏁', 'ゴール！', 'お疲れ様でした！');
+    if (!announced.has('goal')) {
+      speak('ゴールです。お疲れ様でした！');
+      announced.add('goal');
+    }
+    return;
+  }
+
+  // 次ターンを探す（通過済みを除く）
+  let nextTI = -1;
+  for (let ti = 0; ti < turns.length; ti++) {
+    if (turnTrackIdx[ti] > nearestIdx) { nextTI = ti; break; }
+  }
+
+  // ターンなし（直進 or ゴールへ）
+  if (nextTI === -1) {
+    const style = getTurnStyle('直進維持');
+    document.getElementById('turn-arrow-wrap').style.background = style.bg;
+    document.getElementById('turn-arrow').textContent = style.arrow;
+    document.getElementById('turn-arrow').style.color = style.color;
+    document.getElementById('turn-distance').textContent = formatDist(goalDist);
+    document.getElementById('turn-distance').style.color = 'var(--text)';
+    document.getElementById('turn-direction').textContent = 'このままゴールへ';
+    document.getElementById('turn-next').innerHTML =
+      '<span class="next-label">次：</span><span class="next-val">ターンなし</span>';
+    return;
+  }
+
+  const turn = turns[nextTI];
+  const tIdx = turnTrackIdx[nextTI];
+  const style = getTurnStyle(turn.name);
+
+  // 現在地→ターンまでの距離（累積距離を使用）
+  const distGPStoNearest = geoDist(lat, lon, track[nearestIdx].lat, track[nearestIdx].lon);
+  const distOnTrack      = cumDist[tIdx] - cumDist[nearestIdx];
+  const totalDist        = Math.max(0, distGPStoNearest + distOnTrack);
+
+  // パネル更新
+  document.getElementById('turn-arrow-wrap').style.background = style.bg;
+  document.getElementById('turn-arrow').textContent = style.arrow;
+  document.getElementById('turn-arrow').style.color  = style.color;
+  document.getElementById('turn-distance').textContent = formatDist(totalDist);
+  document.getElementById('turn-distance').style.color  = style.color;
+  document.getElementById('turn-direction').textContent = `先 ${turn.name}`;
+
+  // 次の次ターン
+  const nextNext = turns[nextTI + 1];
+  if (nextNext) {
+    const nnStyle = getTurnStyle(nextNext.name);
+    const nnDist  = cumDist[turnTrackIdx[nextTI + 1]] - cumDist[nearestIdx];
+    document.getElementById('turn-next').innerHTML =
+      `<span class="next-label">次：</span>` +
+      `<span class="next-val" style="color:${nnStyle.color}">${nnStyle.arrow} ${nextNext.name}</span>` +
+      `<span class="next-val">　${formatDist(nnDist)}先</span>`;
+  } else {
+    document.getElementById('turn-next').innerHTML =
+      `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
+  }
+
+  // 音声案内
+  const k300 = `${nextTI}-300`;
+  const k100 = `${nextTI}-100`;
+  const k0   = `${nextTI}-0`;
+  if (totalDist <= ANNOUNCE_300 && !announced.has(k300)) {
+    speak(`300メートル先、${turn.name}です`);
+    announced.add(k300);
+  }
+  if (totalDist <= ANNOUNCE_100 && !announced.has(k100)) {
+    speak(`まもなく${turn.name}です`);
+    announced.add(k100);
+  }
+  if (totalDist <= ANNOUNCE_AT && !announced.has(k0)) {
+    speak(`${turn.name}してください`);
+    announced.add(k0);
+  }
+}
+
+function setNavPanelMessage(arrow, dist, dir = '') {
+  document.getElementById('turn-arrow').textContent     = arrow;
+  document.getElementById('turn-distance').textContent  = dist;
+  document.getElementById('turn-direction').textContent = dir;
+}
+
+function recenter() {
+  followMode = true;
+  if (posMarker && map.hasLayer(posMarker)) {
+    map.setView(posMarker.getLatLng(), Math.max(map.getZoom(), 15));
+  }
+}
+
+// ══════════════════════════════════════════════
+// VOICE
+// ══════════════════════════════════════════════
+function unlockAudio() {
+  if (!('speechSynthesis' in window)) return;
+  const dummy = new SpeechSynthesisUtterance(' ');
+  dummy.volume = 0;
+  dummy.lang   = 'ja-JP';
+  speechSynthesis.speak(dummy);
+}
+
+function speak(text) {
+  if (!voiceEnabled || !('speechSynthesis' in window)) return;
+  speechSynthesis.cancel();
+  const u  = new SpeechSynthesisUtterance(text);
+  u.lang   = 'ja-JP';
+  u.rate   = 1.0;
+  u.pitch  = 1.0;
+  u.volume = 1.0;
+  speechSynthesis.speak(u);
+}
+
+function toggleVoice() {
+  voiceEnabled = !voiceEnabled;
+  const btn = document.getElementById('btn-voice');
+  if (voiceEnabled) {
+    btn.textContent = '🔊 音声';
+    btn.classList.remove('muted');
+    speak('音声案内を開始します');
+  } else {
+    speechSynthesis.cancel();
+    btn.textContent = '🔇 音声';
+    btn.classList.add('muted');
+  }
+}
+
+// ══════════════════════════════════════════════
+// SCREEN
+// ══════════════════════════════════════════════
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(`screen-${name}`).classList.add('active');
+  if (name === 'nav') setTimeout(() => map && map.invalidateSize(), 100);
+}
+
+function goBackToList() {
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  showScreen('list');
+  renderRouteList();
+}
+
+// ══════════════════════════════════════════════
+// TOAST
+// ══════════════════════════════════════════════
+let toastTimer;
+function showToast(msg, ms = 3500) {
+  clearTimeout(toastTimer);
+  const el = document.getElementById('toast');
+  el.textContent  = msg;
+  el.style.display = 'block';
+  toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
+}
+
+// ══════════════════════════════════════════════
+// SERVICE WORKER
+// ══════════════════════════════════════════════
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js')
+      .catch(e => console.warn('SW registration failed:', e));
+  });
+}
+
+// ══════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════
+openDB().then(renderRouteList);
+</script>
+</body>
+</html>
