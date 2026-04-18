@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+
+# Streamlit / local data
+.streamlit/secrets.toml
+ramen_journal.db
+ramen_photos/
+
+# Editor files
+.vscode/
+
+.env
+
