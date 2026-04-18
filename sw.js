@@ -1,7 +1,7 @@
 // GPX ナビ Service Worker
 // アプリシェルとマップタイルをキャッシュしてオフライン動作を実現する
 
-const SHELL_CACHE = 'gpxnav-shell-v1';
+const SHELL_CACHE = 'gpxnav-shell-v2';
 const TILE_CACHE  = 'gpxnav-tiles-v1';
 
 const SHELL_ASSETS = [
