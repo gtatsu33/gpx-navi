@@ -27,7 +27,6 @@
 
     body {
       height: 100%;
-      /* safe areaを含む全領域を使う */
       min-height: -webkit-fill-available;
       background: var(--bg);
       color: var(--text);
@@ -37,7 +36,6 @@
 
     .screen {
       display: none;
-      /* dvhが使えるブラウザはそちらを優先、fallbackは-webkit-fill-available */
       height: 100vh;
       height: 100dvh;
       flex-direction: column;
@@ -49,7 +47,6 @@
 
     .list-header {
       padding: 20px 20px 0;
-      /* iPhoneのノッチ対応 */
       padding-top: max(20px, calc(var(--sat) + 12px));
       display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
     }
@@ -59,7 +56,6 @@
 
     .list-body {
       padding: 16px 20px;
-      /* ホームバー分の余白 */
       padding-bottom: calc(16px + var(--sab));
       flex: 1;
       overflow-y: auto;
@@ -92,7 +88,6 @@
       border-top: 2px solid var(--border);
       display: flex;
       flex-direction: column;
-      /* ホームバー分を上乗せした高さ */
       padding-bottom: var(--sab);
     }
 
@@ -109,7 +104,6 @@
 
     #nav-controls {
       display: flex; align-items: center; gap: 8px;
-      /* 上下パディング固定、safe areaはnav-panel側のpadding-bottomで吸収 */
       padding: 10px 14px;
       flex-shrink: 0;
     }
@@ -169,16 +163,25 @@
 <script>
 'use strict';
 
-const DB_NAME        = 'gpxnav-db';
-const DB_VERSION     = 1;
-const STORE          = 'routes';
-const TILE_URL       = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+// ── 定数 ──────────────────────────────────────────────
+const DB_NAME      = 'gpxnav-db';
+const DB_VERSION   = 1;
+const STORE        = 'routes';
+const TILE_URL     = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const PREFETCH_ZOOMS = [13, 14, 15];
-const ANNOUNCE_300   = 300;
-const ANNOUNCE_100   = 100;
-const ANNOUNCE_AT    = 20;
 
-// ── IndexedDB ──
+// 音声案内距離
+const ANNOUNCE_300 = 300;
+const ANNOUNCE_100 = 100;
+const ANNOUNCE_AT  = 20;
+
+// 到達判定
+const ARRIVE_DIST  = 30;   // この距離(m)以内に入ったら到達とみなす
+const PASS_BUFFER  = 20;   // トラックインデックスでここまで通り過ぎたら強制到達とみなす
+const APPROACH_IDX = 100;  // ターゲットの何インデックス手前から到達チェックを有効にするか
+                           // ※周回コース対策：スタート時にゴールセンチネルへ即到達するのを防ぐ
+
+// ── IndexedDB ─────────────────────────────────────────
 let db;
 function openDB() {
   return new Promise((res, rej) => {
@@ -193,7 +196,7 @@ const dbSave   = r  => dbTx('readwrite', s => s.add(r));
 const dbGetAll = () => dbTx('readonly',  s => s.getAll());
 const dbDelete = id => dbTx('readwrite', s => s.delete(id));
 
-// ── GPX Parser ──
+// ── GPX Parser ────────────────────────────────────────
 function parseGPX(text) {
   const doc = new DOMParser().parseFromString(text, 'text/xml');
   const NS  = 'http://www.topografix.com/GPX/1/1';
@@ -223,7 +226,7 @@ function parseGPX(text) {
   return { name, track, turns };
 }
 
-// ── Geo Utils ──
+// ── Geo Utils ─────────────────────────────────────────
 function geoDist(lat1, lon1, lat2, lon2) {
   const R = 6371000, dL = (lat2-lat1)*Math.PI/180, dN = (lon2-lon1)*Math.PI/180;
   const a = Math.sin(dL/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dN/2)**2;
@@ -239,7 +242,7 @@ function latLonToTile(lat, lon, z) {
   };
 }
 
-// ── Tile Prefetch ──
+// ── Tile Prefetch ─────────────────────────────────────
 async function prefetchTiles(track, onProgress) {
   if (!('caches' in window)) { onProgress?.(1,1); return; }
   const tileSet = new Set();
@@ -263,7 +266,7 @@ async function prefetchTiles(track, onProgress) {
   }
 }
 
-// ── List Screen ──
+// ── List Screen ───────────────────────────────────────
 function openFilePicker() { document.getElementById('file-input').click(); }
 
 async function handleFileImport(event) {
@@ -322,11 +325,7 @@ async function deleteRoute(id) {
 
 const escHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// ── Navigation ──
-let map = null, posMarker = null, currentRoute = null, watchId = null;
-let nearestIdx = 0, cumDist = [], turnTrackIdx = [];
-let announced = new Set(), voiceEnabled = true, followMode = true;
-
+// ── Turn Styles ───────────────────────────────────────
 const TURN_STYLE = {
   '右折':     { arrow: '⇒', color: 'var(--right)',  bg: '#2a0808' },
   '左折':     { arrow: '⇐', color: 'var(--left)',   bg: '#08112a' },
@@ -336,33 +335,70 @@ const TURN_STYLE = {
 };
 const getTurnStyle = name => TURN_STYLE[name] || TURN_STYLE['直進維持'];
 
+// ── Navigation State ──────────────────────────────────
+let map = null, posMarker = null, currentRoute = null, watchId = null;
+let nearestIdx = 0;   // 現在地に最も近いトラックポイントのインデックス
+let cumDist = [];     // トラックの累積距離 [m]
+
+// waypoints[] : ターンポイント（トラック順にソート済み） + ゴールセンチネル
+// 各要素: { lat, lon, name, trackIdx, isGoal }
+let waypoints = [];
+let targetIdx = 0;    // 次に目指すウェイポイントのインデックス
+
+let announced = new Set(), voiceEnabled = true, followMode = true;
+
+// ── Navigation Start ──────────────────────────────────
 async function startNavigation(routeId) {
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
 
-  nearestIdx = 0; announced = new Set(); followMode = true; voiceEnabled = true;
+  nearestIdx = 0;
+  announced  = new Set();
+  followMode = true;
+  voiceEnabled = true;
   document.getElementById('btn-voice').textContent = '🔊 音声';
   document.getElementById('btn-voice').classList.remove('muted');
 
   const track = currentRoute.track;
+
+  // 累積距離を計算
   cumDist = [0];
   for (let i = 1; i < track.length; i++)
     cumDist.push(cumDist[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
 
-  turnTrackIdx = currentRoute.turns.map(t => {
+  // 各ターンをトラック上の最近傍インデックスにマッピング
+  const turnsWithIdx = currentRoute.turns.map(t => {
     let best = 0, bestD = Infinity;
     for (let i = 0; i < track.length; i++) {
       const d = geoDist(t.lat, t.lon, track[i].lat, track[i].lon);
       if (d < bestD) { bestD = d; best = i; }
     }
-    return best;
+    return { lat: t.lat, lon: t.lon, name: t.name, trackIdx: best, isGoal: false };
   });
+
+  // トラック進行順にソート
+  turnsWithIdx.sort((a, b) => a.trackIdx - b.trackIdx);
+
+  // 末尾にゴールをセンチネルとして追加
+  waypoints = [
+    ...turnsWithIdx,
+    {
+      lat: track[track.length - 1].lat,
+      lon: track[track.length - 1].lon,
+      name: 'ゴール',
+      trackIdx: track.length - 1,
+      isGoal: true,
+    }
+  ];
+
+  targetIdx = 0;  // 最初の目標は waypoints[0]（ターンがなければゴール）
 
   showScreen('nav');
   requestAnimationFrame(() => setTimeout(initMap, 50));
 }
 
+// ── Map Init ──────────────────────────────────────────
 function initMap() {
   if (map) { map.remove(); map = null; }
   const track = currentRoute.track;
@@ -373,10 +409,11 @@ function initMap() {
   L.marker([track[0].lat, track[0].lon], { icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>', iconSize:[22,22], iconAnchor:[11,11] }) }).bindTooltip('スタート').addTo(map);
   L.marker([track[track.length-1].lat, track[track.length-1].lon], { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11] }) }).bindTooltip('ゴール').addTo(map);
 
-  currentRoute.turns.forEach((t, i) => {
-    const s = getTurnStyle(t.name);
-    L.circleMarker([t.lat, t.lon], { radius:7, color:s.color, fillColor:s.color, fillOpacity:0.9, weight:2 })
-     .bindTooltip(`${i+1}. ${s.arrow} ${t.name}`).addTo(map);
+  // ターンポイントをマップに描画（ゴールセンチネルは除く）
+  waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
+    const s = getTurnStyle(wp.name);
+    L.circleMarker([wp.lat, wp.lon], { radius:7, color:s.color, fillColor:s.color, fillOpacity:0.9, weight:2 })
+     .bindTooltip(`${i+1}. ${s.arrow} ${wp.name}`).addTo(map);
   });
 
   posMarker = L.marker([track[0].lat, track[0].lon], {
@@ -391,6 +428,7 @@ function initMap() {
   startGPS();
 }
 
+// ── GPS ───────────────────────────────────────────────
 function startGPS() {
   if (!navigator.geolocation) { setNavMsg('⚠', 'GPS非対応', ''); return; }
   unlockAudio();
@@ -408,74 +446,106 @@ function onGPSUpdate(pos) {
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
 
+  // 現在地に最も近いトラックポイントを窓探索で更新
+  // （前後の小窓だけ見ることで、周回コースでゴール付近のポイントに
+  //   誤って引き寄せられるのを防ぐ）
   const track = currentRoute.track;
   let best = nearestIdx, bestD = Infinity;
-  for (let i = Math.max(0, nearestIdx-5); i <= Math.min(track.length-1, nearestIdx+40); i++) {
+  for (let i = Math.max(0, nearestIdx - 5); i <= Math.min(track.length - 1, nearestIdx + 40); i++) {
     const d = geoDist(lat, lon, track[i].lat, track[i].lon);
     if (d < bestD) { bestD = d; best = i; }
   }
   nearestIdx = best;
+
   updateNavPanel(lat, lon);
 }
 
-function updateNavPanel(lat, lon) {
-  const track = currentRoute.track, turns = currentRoute.turns;
+// ── ウェイポイント到達チェック ────────────────────────
+// ゴール到達済みなら何もしない。
+// 現在の targetIdx のウェイポイントに到達していれば targetIdx を進める。
+// 「到達」の判定は2段階：
+//   1. APPROACH_IDX ゲート：トラック上でターゲットに近づいていないと
+//      チェックを開始しない（周回コースでスタート時にゴールへ即到達する誤検知防止）
+//   2. 距離 < ARRIVE_DIST  OR  トラック上でPASS_BUFFERだけ通り過ぎた
+function checkWaypointAdvance(lat, lon) {
+  // ナビ完了済み
+  if (targetIdx >= waypoints.length) return;
 
-  const goalDist = geoDist(lat, lon, track[track.length-1].lat, track[track.length-1].lon);
-  if (goalDist < 30 && nearestIdx > track.length * 0.95) {
-    setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
-    if (!announced.has('goal')) { speak('ゴールです。お疲れ様でした！'); announced.add('goal'); }
-    return;
-  }
+  const wp = waypoints[targetIdx];
 
-  let nextTI = -1;
-  for (let ti = 0; ti < turns.length; ti++) {
-    if (turnTrackIdx[ti] > nearestIdx) { nextTI = ti; break; }
-  }
+  // ゲート：まだターゲットに近づいていない
+  if (nearestIdx < wp.trackIdx - APPROACH_IDX) return;
 
-  if (nextTI === -1) {
-    const s = getTurnStyle('直進維持');
-    document.getElementById('turn-arrow-wrap').style.background = s.bg;
-    document.getElementById('turn-arrow').textContent = s.arrow;
-    document.getElementById('turn-arrow').style.color = s.color;
-    document.getElementById('turn-distance').style.color = 'var(--text)';
-    if (nearestIdx / track.length < 0.5) {
-      document.getElementById('turn-distance').textContent = '直進';
-      document.getElementById('turn-direction').textContent = 'コース上を走行中';
-    } else {
-      document.getElementById('turn-distance').textContent = formatDist(goalDist);
-      document.getElementById('turn-direction').textContent = 'このままゴールへ';
+  const dist       = geoDist(lat, lon, wp.lat, wp.lon);
+  const passedOnTrack = nearestIdx > wp.trackIdx + PASS_BUFFER;
+
+  if (dist < ARRIVE_DIST || passedOnTrack) {
+    if (wp.isGoal) {
+      // ゴール到達
+      setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
+      speak('ゴールです。お疲れ様でした！');
+      document.getElementById('turn-next').innerHTML =
+        '<span class="next-label">次：</span><span class="next-val">コース完走！</span>';
+      targetIdx++;  // これ以上チェックしないようにインクリメント
+      return;
     }
-    document.getElementById('turn-next').innerHTML = '<span class="next-label">次：</span><span class="next-val">ターンなし</span>';
-    return;
+
+    // ターン通過 → 次のターゲットへ
+    targetIdx++;
+
+    // 隣接するウェイポイントが連続する場合（GPSが遅れていた等）の連鎖チェック
+    checkWaypointAdvance(lat, lon);
   }
+}
 
-  const turn = turns[nextTI], tIdx = turnTrackIdx[nextTI], s = getTurnStyle(turn.name);
-  const totalDist = Math.max(0,
-    geoDist(lat, lon, track[nearestIdx].lat, track[nearestIdx].lon) + cumDist[tIdx] - cumDist[nearestIdx]);
+// ── パネル更新 ────────────────────────────────────────
+function updateNavPanel(lat, lon) {
+  // 到達チェック（必要なら targetIdx を進める）
+  checkWaypointAdvance(lat, lon);
 
-  document.getElementById('turn-arrow-wrap').style.background    = s.bg;
-  document.getElementById('turn-arrow').textContent              = s.arrow;
-  document.getElementById('turn-arrow').style.color              = s.color;
-  document.getElementById('turn-distance').textContent           = formatDist(totalDist);
-  document.getElementById('turn-distance').style.color           = s.color;
-  document.getElementById('turn-direction').textContent          = `先 ${turn.name}`;
+  // ナビ完了済み
+  if (targetIdx >= waypoints.length) return;
 
-  const nn = turns[nextTI + 1];
-  if (nn) {
-    const ns = getTurnStyle(nn.name);
-    const nd = cumDist[turnTrackIdx[nextTI+1]] - cumDist[nearestIdx];
-    document.getElementById('turn-next').innerHTML =
-      `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${nn.name}</span><span class="next-val">　${formatDist(nd)}先</span>`;
-  } else {
+  const track = currentRoute.track;
+  const wp    = waypoints[targetIdx];
+  const s     = wp.isGoal ? getTurnStyle('直進維持') : getTurnStyle(wp.name);
+
+  // トラック上の累積距離で目標までの距離を算出
+  const distToTarget = Math.max(0,
+    geoDist(lat, lon, track[nearestIdx].lat, track[nearestIdx].lon) +
+    cumDist[wp.trackIdx] - cumDist[nearestIdx]
+  );
+
+  document.getElementById('turn-arrow-wrap').style.background = s.bg;
+  document.getElementById('turn-arrow').textContent           = s.arrow;
+  document.getElementById('turn-arrow').style.color           = s.color;
+  document.getElementById('turn-distance').textContent        = formatDist(distToTarget);
+  document.getElementById('turn-distance').style.color        = s.color;
+  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${wp.name}`;
+
+  // 次のウェイポイント情報
+  const next = waypoints[targetIdx + 1];
+  if (next && !wp.isGoal) {
+    const ns = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(next.name);
+    const nd = Math.max(0, cumDist[next.trackIdx] - cumDist[nearestIdx]);
+    document.getElementById('turn-next').innerHTML = next.isGoal
+      ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
+      : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${next.name}</span><span class="next-val">　${formatDist(nd)}先</span>`;
+  } else if (!wp.isGoal) {
     document.getElementById('turn-next').innerHTML =
       `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
   }
 
-  const k300=`${nextTI}-300`, k100=`${nextTI}-100`, k0=`${nextTI}-0`;
-  if (totalDist <= ANNOUNCE_300 && !announced.has(k300)) { speak(`300メートル先、${turn.name}です`); announced.add(k300); }
-  if (totalDist <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${turn.name}です`);        announced.add(k100); }
-  if (totalDist <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${turn.name}してください`);         announced.add(k0); }
+  // 音声案内（ターン・ゴール共通）
+  const k300 = `${targetIdx}-300`, k100 = `${targetIdx}-100`, k0 = `${targetIdx}-0`;
+  if (wp.isGoal) {
+    if (distToTarget <= ANNOUNCE_300 && !announced.has(k300)) { speak('300メートル先、ゴールです');  announced.add(k300); }
+    if (distToTarget <= ANNOUNCE_100 && !announced.has(k100)) { speak('まもなくゴールです');         announced.add(k100); }
+  } else {
+    if (distToTarget <= ANNOUNCE_300 && !announced.has(k300)) { speak(`300メートル先、${wp.name}です`); announced.add(k300); }
+    if (distToTarget <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
+    if (distToTarget <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
+  }
 }
 
 function setNavMsg(arrow, dist, dir) {
@@ -484,27 +554,33 @@ function setNavMsg(arrow, dist, dir) {
   document.getElementById('turn-direction').textContent = dir;
 }
 
+// ── 復帰ボタン ────────────────────────────────────────
+// 現在地から最も近いウェイポイントを次のターゲットに設定する
+function rerouteToNearest() {
+  if (!currentRoute || !posMarker) return;
+  const pos = posMarker.getLatLng();
+
+  let bestTI = 0, bestD = Infinity;
+  for (let ti = 0; ti < waypoints.length; ti++) {
+    const d = geoDist(pos.lat, pos.lng, waypoints[ti].lat, waypoints[ti].lon);
+    if (d < bestD) { bestD = d; bestTI = ti; }
+  }
+
+  targetIdx  = bestTI;
+  nearestIdx = Math.max(0, waypoints[bestTI].trackIdx - 20);
+
+  showToast(`「${waypoints[bestTI].name}」へ復帰（${Math.round(bestD)}m先）`);
+  updateNavPanel(pos.lat, pos.lng);
+}
+
+// ── Recenter ──────────────────────────────────────────
 function recenter() {
   followMode = true;
   if (posMarker && map.hasLayer(posMarker))
     map.setView(posMarker.getLatLng(), Math.max(map.getZoom(), 15));
 }
 
-function rerouteToNearest() {
-  if (!currentRoute || !posMarker) return;
-  const pos = posMarker.getLatLng(), turns = currentRoute.turns;
-  if (turns.length === 0) { showToast('ターンポイントがありません'); return; }
-  let bestTI = 0, bestD = Infinity;
-  for (let ti = 0; ti < turns.length; ti++) {
-    const d = geoDist(pos.lat, pos.lng, turns[ti].lat, turns[ti].lon);
-    if (d < bestD) { bestD = d; bestTI = ti; }
-  }
-  nearestIdx = Math.max(0, turnTrackIdx[bestTI] - 1);
-  showToast(`「${turns[bestTI].name}」へ復帰（${Math.round(bestD)}m先）`);
-  updateNavPanel(pos.lat, pos.lng);
-}
-
-// ── Voice ──
+// ── Voice ─────────────────────────────────────────────
 function unlockAudio() {
   if (!('speechSynthesis' in window)) return;
   const d = new SpeechSynthesisUtterance(' '); d.volume = 0; d.lang = 'ja-JP'; speechSynthesis.speak(d);
@@ -522,7 +598,7 @@ function toggleVoice() {
   else              { speechSynthesis.cancel(); btn.textContent='🔇 音声'; btn.classList.add('muted'); }
 }
 
-// ── Screen ──
+// ── Screen ────────────────────────────────────────────
 function showScreen(name) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(`screen-${name}`).classList.add('active');
@@ -534,7 +610,7 @@ function goBackToList() {
   showScreen('list'); renderRouteList();
 }
 
-// ── Toast ──
+// ── Toast ─────────────────────────────────────────────
 let toastTimer;
 function showToast(msg, ms=3500) {
   clearTimeout(toastTimer);
@@ -543,12 +619,12 @@ function showToast(msg, ms=3500) {
   toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
 }
 
-// ── Service Worker ──
+// ── Service Worker ────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW:', e)));
 }
 
-// ── Init ──
+// ── Init ──────────────────────────────────────────────
 openDB().then(renderRouteList);
 </script>
 </body>
