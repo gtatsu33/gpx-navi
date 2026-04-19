@@ -160,8 +160,6 @@
       <button class="ctrl-btn" onclick="goBackToList()">← 一覧</button>
       <button class="ctrl-btn" id="btn-voice" onclick="toggleVoice()">🔊 音声</button>
       <button class="ctrl-btn" onclick="rerouteToNearest()">🔄 復帰</button>
-      <button class="ctrl-btn" onclick="speak('テストです')">🎤 テスト</button>  <!-- ← 追加 -->
-
       <div id="nav-status">—</div>
     </div>
   </div>
@@ -183,7 +181,7 @@ const PREFETCH_ZOOMS = [13, 14, 15];
 // 音声案内距離
 const ANNOUNCE_300 = 300;
 const ANNOUNCE_100 = 100;
-const ANNOUNCE_AT  = 20;
+const ANNOUNCE_AT  = 15;
 
 // 到達判定
 const NEAR_DIST  = 15;   // m: この距離以内で「接近フラグ」ON
