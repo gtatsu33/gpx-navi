@@ -145,7 +145,11 @@
 
 <div id="screen-nav" class="screen">
   <div id="map"></div>
-  <button id="btn-recenter" onclick="recenter()">📍</button>
+  <button id="btn-recenter" onclick="recenter()">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--accent)">
+      <polygon points="12,2 22,22 12,17 2,22"/>
+    </svg>
+  </button>
   <div id="debug-log"></div>
   <div id="nav-panel">
     <div id="turn-primary">
@@ -431,8 +435,8 @@ function initMap() {
 
   posMarker = L.marker([track[0].lat, track[0].lon], {
     icon: L.divIcon({
-      html: '<div style="width:18px;height:18px;background:#ff4757;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(255,71,87,0.6)"></div>',
-      iconSize:[18,18], iconAnchor:[9,9]
+      html: '<div id="pos-arrow" style="width:28px;height:28px;transform:rotate(0deg);transition:transform 0.3s;"><svg width="28" height="28" viewBox="0 0 24 24"><polygon points="12,2 22,22 12,17 2,22" fill="#ff4757" stroke="#fff" stroke-width="1.5"/></svg></div>',
+      iconSize:[28,28], iconAnchor:[14,14]
     }), zIndexOffset: 1000
   });
 
@@ -481,6 +485,11 @@ function startGPS() {
 function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
   posMarker.setLatLng([lat, lon]);
+  const heading = pos.coords.heading;
+  if (heading !== null && !isNaN(heading)) {
+    const el = document.getElementById('pos-arrow');
+    if (el) el.style.transform = `rotate(${heading}deg)`;
+  }
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
