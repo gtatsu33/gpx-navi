@@ -434,9 +434,11 @@ function initMap() {
   });
 
   posMarker = L.marker([track[0].lat, track[0].lon], {
+
     icon: L.divIcon({
       html: '<div id="pos-arrow" style="width:28px;height:28px;transform:rotate(0deg);transition:transform 0.3s;"><svg width="28" height="28" viewBox="0 0 24 24"><polygon points="12,2 22,22 12,17 2,22" fill="#ff4757" stroke="#fff" stroke-width="1.5"/></svg></div>',
-      iconSize:[28,28], iconAnchor:[14,14]
+      iconSize:[28,28], iconAnchor:[14,14],
+      className: ''
     }), zIndexOffset: 1000
   });
 
