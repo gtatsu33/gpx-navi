@@ -374,6 +374,7 @@ let prevDistNext  = Infinity;
 
 // ── Navigation Start ──────────────────────────────────
 async function startNavigation(routeId) {
+  unlockAudio();  // ← タップ直後に呼ぶ（ここだけ追加）
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
