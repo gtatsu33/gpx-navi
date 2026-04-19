@@ -184,8 +184,8 @@ const ANNOUNCE_100 = 100;
 const ANNOUNCE_AT  = 20;
 
 // 到達判定
-const NEAR_DIST  = 10;   // m: この距離以内で「接近フラグ」ON
-const DEPART_M   = 10;   // m: 最接近後これだけ遠ざかったら離脱とみなす
+const NEAR_DIST  = 15;   // m: この距離以内で「接近フラグ」ON
+const DEPART_M   = 5;   // m: 最接近後これだけ遠ざかったら離脱とみなす
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -669,14 +669,22 @@ document.addEventListener('visibilitychange', async () => {
 // ── Voice ─────────────────────────────────────────────
 function unlockAudio() {
   if (!('speechSynthesis' in window)) return;
-  const d = new SpeechSynthesisUtterance(' '); d.volume = 0; d.lang = 'ja-JP'; speechSynthesis.speak(d);
+  const d = new SpeechSynthesisUtterance('ナビを開始します');
+  d.volume = 1.0;
+  d.lang = 'ja-JP';
+  speechSynthesis.speak(d);
 }
+
 function speak(text) {
   if (!voiceEnabled || !('speechSynthesis' in window)) return;
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.lang='ja-JP'; u.rate=1.0; u.pitch=1.0; u.volume=1.0;
-  speechSynthesis.speak(u);
+  setTimeout(() => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP'; u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
+    speechSynthesis.speak(u);
+  }, 150);
 }
+
 function toggleVoice() {
   voiceEnabled = !voiceEnabled;
   const btn = document.getElementById('btn-voice');
