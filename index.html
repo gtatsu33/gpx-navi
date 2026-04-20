@@ -387,6 +387,7 @@ let prevDistNext  = Infinity;
 
 // ── Navigation Start ──────────────────────────────────
 async function startNavigation(routeId) {
+  unlockAudio(); // awaitより前：ユーザージェスチャーのコンテキスト内で音声を解放
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
