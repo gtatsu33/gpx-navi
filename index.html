@@ -405,6 +405,9 @@ async function startNavigation(routeId) {
     dbgLog(`[WPT][${i}] ${wp.isGoal ? '🏁GOAL' : wp.name} (${wp.lat.toFixed(5)},${wp.lon.toFixed(5)})`);
   });
 
+  // ↓ デバッグ用一時停止。ログを確認したらOKを押す
+  confirm('waypointsを確認してください。OKで続行。');
+
   showScreen('nav');
   requestAnimationFrame(() => setTimeout(initMap, 50));
 }
