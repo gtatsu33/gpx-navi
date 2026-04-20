@@ -233,7 +233,13 @@ const dbDelete = id => dbTx('readwrite', s => s.delete(id));
 function parseGPX(text) {
   const doc = new DOMParser().parseFromString(text, 'text/xml');
   const NS  = 'http://www.topografix.com/GPX/1/1';
-  const getEls  = (p, t) => [...p.getElementsByTagNameNS(NS, t), ...p.getElementsByTagName(t)];
+  // getElementsByTagNameNS と getElementsByTagName の両方を試し、
+  // 多い方（実際に要素が入っている方）を使う。両方使うと重複する。
+  const getEls = (p, t) => {
+    const withNS = [...p.getElementsByTagNameNS(NS, t)];
+    const withoutNS = [...p.getElementsByTagName(t)];
+    return withNS.length >= withoutNS.length ? withNS : withoutNS;
+  };
   const getText = (p, t) => { const el = getEls(p, t)[0]; return el ? el.textContent.trim() : ''; };
 
   const name = getText(doc, 'name') || getText(doc, 'n') || 'ルート';
