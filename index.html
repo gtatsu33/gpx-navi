@@ -546,9 +546,8 @@ function checkAnnounce(dist) {
 // ── GPS ───────────────────────────────────────────────
 function startGPS() {
   if (!navigator.geolocation) { setNavMsg('⚠', 'GPS非対応', ''); return; }
-  unlockAudio();
   acquireWakeLock();  // ナビ開始時にスリープ防止
-  speak('ナビを開始します');
+  unlockAudio(() => speak('ナビを開始します'));
   watchId = navigator.geolocation.watchPosition(
     onGPSUpdate,
     () => { document.getElementById('nav-status').textContent = 'GPS取得中...'; },
@@ -743,10 +742,11 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 // ── Voice ─────────────────────────────────────────────
-function unlockAudio() {
-  if (!('speechSynthesis' in window)) return;
+function unlockAudio(callback) {
+  if (!('speechSynthesis' in window)) { callback && callback(); return; }
   const d = new SpeechSynthesisUtterance(' ');
   d.volume = 0; d.lang = 'ja-JP';
+  if (callback) d.onend = callback;
   speechSynthesis.speak(d);
 }
 
