@@ -119,6 +119,29 @@
     .leaflet-control-zoom { border: none !important; }
     .leaflet-control-zoom a { background: rgba(13,13,26,0.85) !important; color: #fff !important; border: 1px solid var(--border) !important; }
     .leaflet-control-attribution { font-size: 10px !important; background: rgba(0,0,0,0.5) !important; color: #777 !important; }
+    #wpt-debug-overlay {
+      position: fixed; inset: 0; z-index: 9000;
+      background: rgba(13,13,26,0.97);
+      display: flex; flex-direction: column;
+      padding: 20px;
+      padding-top: max(20px, calc(env(safe-area-inset-top) + 12px));
+    }
+    #wpt-debug-overlay h2 {
+      color: var(--accent); font-family: var(--font-num);
+      font-size: 16px; margin-bottom: 10px; flex-shrink: 0;
+    }
+    #wpt-debug-list {
+      flex: 1; overflow-y: auto;
+      font-family: monospace; font-size: 13px;
+      color: #0f0; line-height: 1.9;
+    }
+    #wpt-debug-overlay button {
+      margin-top: 14px; flex-shrink: 0;
+      background: var(--accent); color: var(--bg);
+      border: none; border-radius: 10px;
+      padding: 14px; font-size: 16px; font-weight: 700;
+      font-family: var(--font-jp);
+    }
     #debug-log {
       position: absolute; bottom: 220px; left: 8px; right: 8px;
       background: rgba(0,0,0,0.82); color: #0f0; font-family: monospace;
@@ -165,6 +188,11 @@
 </div>
 
 <div id="toast"></div>
+<div id="wpt-debug-overlay" style="display:none">
+  <h2>🗺 ウェイポイント確認（デバッグ）</h2>
+  <div id="wpt-debug-list"></div>
+  <button onclick="closeWptDebug()">✅ 確認OK → ナビ開始</button>
+</div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -399,15 +427,21 @@ async function startNavigation(routeId) {
   ];
   targetIdx = 0;
 
-  // waypoints の中身をログ出力（デバッグ用）
-  dbgLog(`[WPT] 総数=${waypoints.length} (ターン${waypoints.length-1}個+ゴール)`);
+  // waypoints の中身をオーバーレイ表示（デバッグ用）
+  const wptList = document.getElementById('wpt-debug-list');
+  wptList.innerHTML = '';
   waypoints.forEach((wp, i) => {
-    dbgLog(`[WPT][${i}] ${wp.isGoal ? '🏁GOAL' : wp.name} (${wp.lat.toFixed(5)},${wp.lon.toFixed(5)})`);
+    const div = document.createElement('div');
+    div.textContent = `[${i}] ${wp.isGoal ? '🏁 GOAL' : wp.name}  (${wp.lat.toFixed(5)}, ${wp.lon.toFixed(5)})`;
+    wptList.appendChild(div);
   });
+  document.getElementById('wpt-debug-overlay').style.display = 'flex';
+  // closeWptDebug() でナビ開始
+}
 
-  // ↓ デバッグ用一時停止。ログを確認したらOKを押す
-  confirm('waypointsを確認してください。OKで続行。');
-
+// ── WPT Debug Overlay ────────────────────────────────
+function closeWptDebug() {
+  document.getElementById('wpt-debug-overlay').style.display = 'none';
   showScreen('nav');
   requestAnimationFrame(() => setTimeout(initMap, 50));
 }
