@@ -519,10 +519,10 @@ function buildAnnouncePhases(d0, wpName, isGoal) {
     ];
   }
   dbgLog(`[ANN] d0=${Math.round(d0)}m phases=${announcePhases.map(p=>p.trigger).join(',')}`);
-  // 'far' は即発話
+  // 'far' は2秒後に発話（「ナビを開始します」との競合を避けるため）
   if (announcePhases.length > 0 && announcePhases[0].trigger === 'far') {
-    speak(announcePhases[0].text);
-    announcePhases.shift();
+    const farText = announcePhases.shift().text;
+    setTimeout(() => speak(farText), 2000);
   }
 }
 
@@ -593,7 +593,7 @@ function checkWaypointAdvance(lat, lon) {
     if (wp.isGoal) {
       if (dist < 30) {
         setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
-        speak('ゴールです。お疲れ様でした！');
+        speakNow('ゴールです。お疲れ様でした！');
         document.getElementById('turn-next').innerHTML =
           '<span class="next-label">次：</span><span class="next-val">コース完走！</span>';
         targetIdx++;
@@ -745,14 +745,22 @@ document.addEventListener('visibilitychange', async () => {
 // ── Voice ─────────────────────────────────────────────
 function unlockAudio() {
   if (!('speechSynthesis' in window)) return;
-  const d = new SpeechSynthesisUtterance(' '); d.volume = 0; d.lang = 'ja-JP'; speechSynthesis.speak(d);
+  const d = new SpeechSynthesisUtterance(' ');
+  d.volume = 0; d.lang = 'ja-JP';
+  speechSynthesis.speak(d);
 }
+
 function speak(text) {
   if (!voiceEnabled || !('speechSynthesis' in window)) return;
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text); u.lang='ja-JP'; u.rate=1.0; u.pitch=1.0; u.volume=1.0;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ja-JP'; u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
   speechSynthesis.speak(u);
 }
+
+// speak の別名（廃止したキューの名残を置換するため残す）
+const speakNow = speak;
+
 function toggleVoice() {
   voiceEnabled = !voiceEnabled;
   const btn = document.getElementById('btn-voice');
