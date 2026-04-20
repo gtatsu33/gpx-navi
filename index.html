@@ -179,9 +179,9 @@ const TILE_URL     = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const PREFETCH_ZOOMS = [13, 14, 15];
 
 // 音声案内距離
-const ANNOUNCE_300 = 300;
-const ANNOUNCE_100 = 100;
-const ANNOUNCE_AT  = 20;
+const ANNOUNCE_300 = 300;  // 「約Xm先」2回目の発話トリガー
+const ANNOUNCE_100 = 100;  // 「まもなく」発話トリガー
+const ANNOUNCE_AT  = 15;   // 「してください」発話トリガー
 
 // 到達判定
 const NEAR_DIST  = 10;   // m: この距離以内で「接近フラグ」ON
@@ -357,7 +357,14 @@ let map = null, posMarker = null, targetMarker = null, currentRoute = null, watc
 let waypoints = [];
 let targetIdx = 0;   // 次に目指すウェイポイントの番号
 
-let announced = new Set(), voiceEnabled = true, followMode = true;
+let voiceEnabled = true, followMode = true;
+// 音声案内フェーズキュー（targetIdx が変わるたびに再構築）
+// 各要素: { trigger: 'far'|'300'|'100'|'15', done: false }
+// 'far' = 即発話（起点距離アナウンス）
+// '300' = 300m付近で発話
+// '100' = 100m以内で発話
+// '15'  = 15m以内で発話
+let announcePhases = [];
 let wakeLock = null;  // Screen Wake Lock
 
 // ── 画面ログ（デバッグ用） ───────────────────────────
@@ -384,7 +391,7 @@ async function startNavigation(routeId) {
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
 
-  announced     = new Set();
+  announcePhases = [];
   nearTarget    = false;
   minDistTarget = Infinity;
   prevDistNext  = Infinity;
@@ -469,6 +476,71 @@ function updateTargetMarker() {
   const statusText = `[${targetIdx}/${waypoints.length-1}] ${wp.name}`;
   document.getElementById('nav-status').textContent = statusText;
   dbgLog(`[TGT] ${targetIdx}/${waypoints.length-1} "${wp.name}" goal=${wp.isGoal}`);
+  // posMarker が存在すれば現在地からd0を計算してフェーズ構築
+  if (posMarker && map && map.hasLayer(posMarker)) {
+    const pos = posMarker.getLatLng();
+    const d0 = geoDist(pos.lat, pos.lng, wp.lat, wp.lon);
+    buildAnnouncePhases(d0, wp.name, wp.isGoal);
+  }
+}
+
+// ── 音声案内フェーズ構築 ──────────────────────────────
+// targetIdx が変わった瞬間（posMarker が現在地にいる前提）に呼ぶ。
+// d0: 現在地 → 新しい目標までの距離
+function buildAnnouncePhases(d0, wpName, isGoal) {
+  const label = isGoal ? 'ゴール' : wpName;
+  const round50 = d => Math.round(d / 50) * 50;
+
+  if (d0 > 300) {
+    // ①即発話 ②300m付近 ③100m ④15m
+    announcePhases = [
+      { trigger: 'far',  text: `約${round50(d0)}メートル先、${label}です` },
+      { trigger: '300',  text: `約${round50(300)}メートル先、${label}です` },
+      { trigger: '100',  text: isGoal ? 'まもなくゴールです' : `まもなく${label}です` },
+      { trigger: '15',   text: isGoal ? 'ゴールです' : `${label}してください` },
+    ];
+  } else if (d0 > 100) {
+    // ①即発話 ②100m ③15m
+    announcePhases = [
+      { trigger: 'far',  text: `約${round50(d0)}メートル先、${label}です` },
+      { trigger: '100',  text: isGoal ? 'まもなくゴールです' : `まもなく${label}です` },
+      { trigger: '15',   text: isGoal ? 'ゴールです' : `${label}してください` },
+    ];
+  } else if (d0 > 15) {
+    // ①即発話（まもなく） ②15m
+    announcePhases = [
+      { trigger: 'far',  text: isGoal ? 'まもなくゴールです' : `まもなく${label}です` },
+      { trigger: '15',   text: isGoal ? 'ゴールです' : `${label}してください` },
+    ];
+  } else {
+    // ①即発話（してください）
+    announcePhases = [
+      { trigger: 'far',  text: isGoal ? 'ゴールです' : `${label}してください` },
+    ];
+  }
+  dbgLog(`[ANN] d0=${Math.round(d0)}m phases=${announcePhases.map(p=>p.trigger).join(',')}`);
+  // 'far' は即発話
+  if (announcePhases.length > 0 && announcePhases[0].trigger === 'far') {
+    speak(announcePhases[0].text);
+    announcePhases.shift();
+  }
+}
+
+// ── 音声案内発火チェック ──────────────────────────────
+// GPS更新ごとに呼ぶ。先頭フェーズの条件を満たしたら発話してshift()。
+function checkAnnounce(dist) {
+  if (announcePhases.length === 0) return;
+  const phase = announcePhases[0];
+  const fire =
+    (phase.trigger === '300' && dist <= ANNOUNCE_300) ||
+    (phase.trigger === '100' && dist <= ANNOUNCE_100) ||
+    (phase.trigger === '15'  && dist <= ANNOUNCE_AT);
+  if (fire) {
+    speak(phase.text);
+    announcePhases.shift();
+    // 次のフェーズも同時に条件を満たす場合は再帰チェック
+    checkAnnounce(dist);
+  }
 }
 
 // ── GPS ───────────────────────────────────────────────
@@ -476,6 +548,7 @@ function startGPS() {
   if (!navigator.geolocation) { setNavMsg('⚠', 'GPS非対応', ''); return; }
   unlockAudio();
   acquireWakeLock();  // ナビ開始時にスリープ防止
+  speak('ナビを開始します');
   watchId = navigator.geolocation.watchPosition(
     onGPSUpdate,
     () => { document.getElementById('nav-status').textContent = 'GPS取得中...'; },
@@ -486,6 +559,12 @@ function startGPS() {
 function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
   posMarker.setLatLng([lat, lon]);
+  // GPS初回取得時、まだフェーズが構築されていなければ現在地から構築
+  if (announcePhases.length === 0 && targetIdx < waypoints.length) {
+    const wp = waypoints[targetIdx];
+    const d0 = geoDist(lat, lon, wp.lat, wp.lon);
+    buildAnnouncePhases(d0, wp.name, wp.isGoal);
+  }
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
@@ -556,10 +635,10 @@ function checkWaypointAdvance(lat, lon) {
 
     // ①②③ 全クリア → 通過確定
     dbgLog(`[ARRIVE] "${wp.name}" min=${Math.round(minDistTarget)}m d=${Math.round(dist)}m`);
-    speak(`${wp.name}です`);
     targetIdx++;
     nearTarget = false; minDistTarget = Infinity; prevDistNext = Infinity;
     changed = true;
+    // 次のターゲットへのフェーズ構築は updateTargetMarker → buildAnnouncePhases で行う
   }
 
   if (changed) updateTargetMarker();
@@ -595,16 +674,8 @@ function updateNavPanel(lat, lon) {
       `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
   }
 
-  // 音声案内
-  const k300 = `${targetIdx}-300`, k100 = `${targetIdx}-100`, k0 = `${targetIdx}-0`;
-  if (wp.isGoal) {
-    if (dist <= ANNOUNCE_300 && !announced.has(k300)) { speak('300メートル先、ゴールです');  announced.add(k300); }
-    if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak('まもなくゴールです');         announced.add(k100); }
-  } else {
-    if (dist <= ANNOUNCE_300 && !announced.has(k300)) { speak(`300メートル先、${wp.name}です`); announced.add(k300); }
-    if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
-    if (dist <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
-  }
+  // 音声案内フェーズチェック
+  checkAnnounce(dist);
 }
 
 function setNavMsg(arrow, dist, dir) {
