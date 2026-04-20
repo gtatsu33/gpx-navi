@@ -119,13 +119,11 @@
     .leaflet-control-zoom { border: none !important; }
     .leaflet-control-zoom a { background: rgba(13,13,26,0.85) !important; color: #fff !important; border: 1px solid var(--border) !important; }
     .leaflet-control-attribution { font-size: 10px !important; background: rgba(0,0,0,0.5) !important; color: #777 !important; }
-    .leaflet-div-icon { background: none !important; border: none !important; }
     #debug-log {
       position: absolute; bottom: 220px; left: 8px; right: 8px;
       background: rgba(0,0,0,0.82); color: #0f0; font-family: monospace;
       font-size: 11px; padding: 6px 8px; border-radius: 8px;
       max-height: 140px; overflow-y: auto; z-index: 950;
-      pointer-events: none;
     }
   </style>
 </head>
@@ -146,11 +144,7 @@
 
 <div id="screen-nav" class="screen">
   <div id="map"></div>
-  <button id="btn-recenter" onclick="recenter()">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="var(--accent)">
-      <polygon points="12,2 22,22 12,17 2,22"/>
-    </svg>
-  </button>
+  <button id="btn-recenter" onclick="recenter()">📍</button>
   <div id="debug-log"></div>
   <div id="nav-panel">
     <div id="turn-primary">
@@ -186,11 +180,11 @@ const PREFETCH_ZOOMS = [13, 14, 15];
 // 音声案内距離
 const ANNOUNCE_300 = 300;
 const ANNOUNCE_100 = 100;
-const ANNOUNCE_AT  = 15;
+const ANNOUNCE_AT  = 20;
 
 // 到達判定
-const NEAR_DIST  = 15;   // m: この距離以内で「接近フラグ」ON
-const DEPART_M   = 5;   // m: 最接近後これだけ遠ざかったら離脱とみなす
+const NEAR_DIST  = 10;   // m: この距離以内で「接近フラグ」ON
+const DEPART_M   = 10;   // m: 最接近後これだけ遠ざかったら離脱とみなす
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -360,7 +354,7 @@ let announced = new Set(), voiceEnabled = true, followMode = true;
 let wakeLock = null;  // Screen Wake Lock
 
 // ── 画面ログ（デバッグ用） ───────────────────────────
-const MAX_LOG = 20;
+const MAX_LOG = 50;
 function dbgLog(msg) {
   const el = document.getElementById('debug-log');
   if (!el) return;
@@ -379,7 +373,6 @@ let prevDistNext  = Infinity;
 
 // ── Navigation Start ──────────────────────────────────
 async function startNavigation(routeId) {
-  unlockAudio();  // ← タップ直後に呼ぶ（ここだけ追加）
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
   if (!currentRoute) return;
@@ -441,11 +434,9 @@ function initMap() {
   });
 
   posMarker = L.marker([track[0].lat, track[0].lon], {
-
     icon: L.divIcon({
-      html: '<div id="pos-arrow" style="width:28px;height:28px;transform:rotate(0deg);transition:transform 0.3s;"><svg width="28" height="28" viewBox="0 0 24 24"><polygon points="12,2 22,22 12,17 2,22" fill="#ff4757" stroke="#fff" stroke-width="1.5"/></svg></div>',
-      iconSize:[28,28], iconAnchor:[14,14],
-      className: ''
+      html: '<div style="width:18px;height:18px;background:#ff4757;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(255,71,87,0.6)"></div>',
+      iconSize:[18,18], iconAnchor:[9,9]
     }), zIndexOffset: 1000
   });
 
@@ -494,11 +485,6 @@ function startGPS() {
 function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
   posMarker.setLatLng([lat, lon]);
-  const heading = pos.coords.heading;
-  if (heading !== null && !isNaN(heading)) {
-    const el = document.getElementById('pos-arrow');
-    if (el) el.style.transform = `rotate(${heading}deg)`;
-  }
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
@@ -618,7 +604,6 @@ function updateNavPanel(lat, lon) {
     if (dist <= ANNOUNCE_100 && !announced.has(k100)) { speak(`まもなく${wp.name}です`);        announced.add(k100); }
     if (dist <= ANNOUNCE_AT  && !announced.has(k0))   { speak(`${wp.name}してください`);         announced.add(k0); }
   }
-  dbgLog(`[NAV] [${targetIdx}]"${wp.name}" d=${Math.round(dist)}m`);
 }
 
 function setNavMsg(arrow, dist, dir) {
@@ -688,22 +673,14 @@ document.addEventListener('visibilitychange', async () => {
 // ── Voice ─────────────────────────────────────────────
 function unlockAudio() {
   if (!('speechSynthesis' in window)) return;
-  const d = new SpeechSynthesisUtterance('ナビを開始します');
-  d.volume = 1.0;
-  d.lang = 'ja-JP';
-  speechSynthesis.speak(d);
+  const d = new SpeechSynthesisUtterance(' '); d.volume = 0; d.lang = 'ja-JP'; speechSynthesis.speak(d);
 }
-
 function speak(text) {
   if (!voiceEnabled || !('speechSynthesis' in window)) return;
   speechSynthesis.cancel();
-  setTimeout(() => {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'ja-JP'; u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
-    speechSynthesis.speak(u);
-  }, 150);
+  const u = new SpeechSynthesisUtterance(text); u.lang='ja-JP'; u.rate=1.0; u.pitch=1.0; u.volume=1.0;
+  speechSynthesis.speak(u);
 }
-
 function toggleVoice() {
   voiceEnabled = !voiceEnabled;
   const btn = document.getElementById('btn-voice');
