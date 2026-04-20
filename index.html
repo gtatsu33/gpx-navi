@@ -406,6 +406,12 @@ async function startNavigation(routeId) {
   ];
   targetIdx = 0;
 
+  // waypoints の中身をログ出力（デバッグ用）
+  dbgLog(`[WPT] 総数=${waypoints.length} (ターン${waypoints.length-1}個+ゴール)`);
+  waypoints.forEach((wp, i) => {
+    dbgLog(`[WPT][${i}] ${wp.isGoal ? '🏁GOAL' : wp.name} (${wp.lat.toFixed(5)},${wp.lon.toFixed(5)})`);
+  });
+
   showScreen('nav');
   requestAnimationFrame(() => setTimeout(initMap, 50));
 }
