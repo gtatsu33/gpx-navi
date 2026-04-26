@@ -130,7 +130,9 @@
       position: absolute; bottom: 220px; left: 8px; right: 8px;
       height: 90px; border-radius: 8px; z-index: 950;
       background: rgba(0,0,0,0.82);
+      display: none;
     }
+    #btn-grade.grade-on { background: #1a3a2a; color: var(--go); border: 1px solid var(--go); }
   </style>
 </head>
 <body>
@@ -166,6 +168,7 @@
       <button class="ctrl-btn" onclick="goBackToList()">← 一覧</button>
       <button class="ctrl-btn" id="btn-voice" onclick="toggleVoice()">🔊 音声</button>
       <button class="ctrl-btn" onclick="rerouteToNearest()">🔄 復帰</button>
+      <button class="ctrl-btn" id="btn-grade" onclick="toggleGrade()">⛰ 勾配</button>
       <div id="nav-status">—</div>
     </div>
   </div>
@@ -200,6 +203,7 @@ const SHOW_DEBUG = false;
 // ── 勾配プロファイル状態 ───────────────────────────────
 let trackGrads    = [];  // { cumDist, ele, grade } per trkpt
 let currentTrkIdx = 0;   // 現在地に最近接のtrkptインデックス
+let gradeEnabled  = false; // 勾配表示ON/OFF（起動時はOFF）
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -588,6 +592,7 @@ async function startNavigation(routeId) {
   followMode = true;
   currentTrkIdx = 0;
   trackGrads = buildTrackGrads(currentRoute.track);
+  gradeEnabled = false;
   voiceEnabled = true;
   document.getElementById('btn-voice').textContent = '🔊 音声';
   document.getElementById('btn-voice').classList.remove('muted');
@@ -613,9 +618,12 @@ async function startNavigation(routeId) {
 function initMap() {
   if (map) { map.remove(); map = null; }
   targetMarker = null;
-  // デバッグ/勾配の表示切り替え
-  document.getElementById('debug-log').style.display   = SHOW_DEBUG ? 'block' : 'none';
-  document.getElementById('grade-canvas').style.display = SHOW_DEBUG ? 'none'  : 'block';
+  // デバッグログ表示切り替え
+  document.getElementById('debug-log').style.display = SHOW_DEBUG ? 'block' : 'none';
+  // 勾配キャンバスは gradeEnabled に従う（起動時は非表示）
+  document.getElementById('grade-canvas').style.display = 'none';
+  const btnGrade = document.getElementById('btn-grade');
+  if (btnGrade) { btnGrade.classList.remove('grade-on'); }
   const track = currentRoute.track;
   map = L.map('map', { zoomControl: true }).setView([track[0].lat, track[0].lon], 15);
   L.tileLayer(TILE_URL, { attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19, maxNativeZoom: 18 }).addTo(map);
@@ -763,8 +771,10 @@ function onGPSUpdate(pos) {
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
-  updateCurrentTrkIdx(lat, lon);
-  if (!SHOW_DEBUG) renderGradeCanvas();
+  if (gradeEnabled && !SHOW_DEBUG) {
+    updateCurrentTrkIdx(lat, lon);
+    renderGradeCanvas();
+  }
   updateNavPanel(lat, lon);
 }
 
@@ -988,6 +998,25 @@ function toggleVoice() {
   const btn = document.getElementById('btn-voice');
   if (voiceEnabled) { btn.textContent='🔊 音声'; btn.classList.remove('muted'); speak('音声案内を開始します'); }
   else              { speechSynthesis.cancel(); btn.textContent='🔇 音声'; btn.classList.add('muted'); }
+}
+
+function toggleGrade() {
+  gradeEnabled = !gradeEnabled;
+  const btn    = document.getElementById('btn-grade');
+  const canvas = document.getElementById('grade-canvas');
+  if (gradeEnabled) {
+    canvas.style.display = 'block';
+    btn.classList.add('grade-on');
+    // 現在地が取得済みならインデックスを即時更新して描画
+    if (posMarker && map && map.hasLayer(posMarker)) {
+      const pos = posMarker.getLatLng();
+      updateCurrentTrkIdx(pos.lat, pos.lng);
+    }
+    renderGradeCanvas();
+  } else {
+    canvas.style.display = 'none';
+    btn.classList.remove('grade-on');
+  }
 }
 
 // ── Screen ────────────────────────────────────────────
