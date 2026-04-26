@@ -510,7 +510,7 @@ function renderGradeCanvas() {
   const eleMax = Math.max(...pts.map(p => p.ele));
   const eleRange = Math.max(eleMax - eleMin, 10);
   const xOf = d => Math.round(((d - startDist) / LOOKAHEAD) * W);
-  const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 10);
+  const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 35);
 
   // 同色の連続セグメントを1パスでまとめて描画（縦筋防止）
   let si = 1;
