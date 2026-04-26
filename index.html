@@ -446,8 +446,7 @@ function buildTrackGrads(track) {
 }
 
 function gradeColor(g) {
-  if (g < -2)  return '#4fc3f7';  // 下り: 水色
-  if (g < 3)   return '#2ed573';  // ほぼ平坦: 緑
+  if (g < 3)   return '#2ed573';  // 下り〜ほぼ平坦: 緑
   if (g < 6)   return '#ffd32a';  // やや上り: 黄
   if (g < 9)   return '#ff6348';  // 上り: オレンジ
   if (g < 12)  return '#ff4757';  // 急坂: 赤
@@ -502,7 +501,7 @@ function renderGradeCanvas() {
   const eleMin = Math.min(...pts.map(p => p.ele));
   const eleMax = Math.max(...pts.map(p => p.ele));
   const eleRange = Math.max(eleMax - eleMin, 10);
-  const xOf = d => ((d - startDist) / LOOKAHEAD) * W;
+  const xOf = d => Math.round(((d - startDist) / LOOKAHEAD) * W);
   const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 10);
 
   // 同色の連続セグメントを1パスでまとめて描画（縦筋防止）
