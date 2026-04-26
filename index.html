@@ -184,8 +184,8 @@ const ANNOUNCE_100 = 100;  // 「まもなく」発話トリガー
 const ANNOUNCE_AT  = 15;   // 「してください」発話トリガー
 
 // 到達判定
-const NEAR_DIST  = 10;   // m: この距離以内で「接近フラグ」ON
-const DEPART_M   = 10;   // m: 最接近後これだけ遠ざかったら離脱とみなす
+const NEAR_DIST  = 25;   // m: この距離以内で「接近フラグ」ON
+const DEPART_M   = 5;    // m: 最接近後これだけ遠ざかったら離脱とみなす
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -421,7 +421,7 @@ async function startNavigation(routeId) {
   // trkpt へのマッピング不要。座標をそのまま使う。
   waypoints = [
     ...currentRoute.turns.map(t => ({
-      lat: t.lat, lon: t.lon, name: t.name, isGoal: false
+      lat: t.lat, lon: t.lon, name: t.name, isGoal: false, trkIdx: t.trkIdx
     })),
     { lat: track[track.length - 1].lat, lon: track[track.length - 1].lon,
       name: 'ゴール', isGoal: true }
@@ -641,8 +641,8 @@ function checkWaypointAdvance(lat, lon) {
     //       なりやすく、条件③が永遠に満たされない。
     if (next && !next.isGoal) {
       const dn = geoDist(lat, lon, next.lat, next.lon);
-      if (dn >= prevDistNext) {
-        // 次wptにも近づいていない
+      if (dn > prevDistNext + 5) {
+        // 次wptから5m超遠ざかっている（GPS誤差±5mを許容）
         prevDistNext = dn;
         break;
       }
