@@ -413,22 +413,44 @@ function buildTrackGrads(track) {
   if (!track || track.length < 2) return [];
   if (!track.some(p => p.ele != null)) return [];
 
-  // ① 累積距離を先に計算（スムージングでも使うため）
+  // ① 累積距離の計算
   const cumDists = [0];
   for (let i = 1; i < track.length; i++)
     cumDists.push(cumDists[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
 
-  // ② 距離ベースのスムージング（±30m 範囲の平均）
-  // 点間隔に依存しないため、密なGPXでも粗いGPXでも同じ実距離で平均する
-  const SMOOTH_R = 30; // m
+  // ② 標高のスムージング（窓幅を広めに設定）
+  const SMOOTH_R = 40; // 前後40m、計80mの広い範囲で平滑化
   const smooth = track.map((_, i) => {
     let sum = 0, cnt = 0;
-    for (let j = i; j >= 0 && cumDists[i] - cumDists[j] <= SMOOTH_R; j--)
-      if (track[j].ele != null) { sum += track[j].ele; cnt++; }
-    for (let j = i + 1; j < track.length && cumDists[j] - cumDists[i] <= SMOOTH_R; j++)
-      if (track[j].ele != null) { sum += track[j].ele; cnt++; }
+    for (let j = 0; j < track.length; j++) {
+      if (Math.abs(cumDists[i] - cumDists[j]) <= SMOOTH_R && track[j].ele != null) {
+        sum += track[j].ele;
+        cnt++;
+      }
+    }
     return cnt > 0 ? sum / cnt : null;
   });
+
+  // ③ 勾配計算（中央差分方式：前後15mの差を見る）
+  const GRADE_WIN = 15; // 地点iの前後15m、合計30mの斜度
+  return track.map((_, i) => {
+    let grade = 0;
+    if (smooth[i] != null) {
+      // 前後のインデックスを探す
+      let prevIdx = i, nextIdx = i;
+      while (prevIdx > 0 && cumDists[i] - cumDists[prevIdx] < GRADE_WIN) prevIdx--;
+      while (nextIdx < track.length - 1 && cumDists[nextIdx] - cumDists[i] < GRADE_WIN) nextIdx++;
+
+      const actualWin = cumDists[nextIdx] - cumDists[prevIdx];
+      // 窓幅が最低20m確保できている場合のみ計算
+      if (actualWin >= 20 && smooth[nextIdx] != null && smooth[prevIdx] != null) {
+        grade = ((smooth[nextIdx] - smooth[prevIdx]) / actualWin) * 100;
+        grade = Math.max(-25, Math.min(25, grade));
+      }
+    }
+    return { cumDist: cumDists[i], ele: smooth[i], grade };
+  });
+}
 
   // ③ 勾配は前方25mウィンドウで計算（距離ベース）
   const GRADE_WIN = 25;
