@@ -449,20 +449,7 @@ function buildTrackGrads(track) {
   });
 }
 
-  // ③ 勾配は前方25mウィンドウで計算（距離ベース）
-  const GRADE_WIN = 25;
-  return track.map((_, i) => {
-    let grade = 0;
-    if (smooth[i] != null) {
-      let j = i;
-      while (j < track.length - 1 && cumDists[j] - cumDists[i] < GRADE_WIN) j++;
-      const win = cumDists[j] - cumDists[i];
-      if (win >= 5 && smooth[j] != null)
-        grade = Math.max(-30, Math.min(30, ((smooth[j] - smooth[i]) / win) * 100));
-    }
-    return { cumDist: cumDists[i], ele: smooth[i], grade };
-  });
-}
+
 
 function gradeColor(g) {
   if (g < 3)   return '#2ed573';  // 下り〜ほぼ平坦: 緑
