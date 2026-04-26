@@ -347,8 +347,47 @@ if st.session_state.get("_file_name") != uploaded.name:
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 in_edit_mode = "edit_turns" in st.session_state
 
-# マッチング済み座標があればそちらを使う（標高取得・ターン検出・地図描画すべてに適用）
+# ─────────────────────────────────────────────
+# ファイル読み込み後の自動処理
+# ─────────────────────────────────────────────
+_needs_rerun = False
+_mm_ran      = False
+
+if st.session_state.get("_mm_status") is None:
+    _profile = st.session_state.get("_mm_profile", "cycling")
+    _radius  = st.session_state.get("_mm_radius",  50)
+    matched, n_snapped, err = map_match_points(points, profile=_profile, radius=_radius)
+    st.session_state["_matched_points"] = matched
+    st.session_state["_mm_n_snapped"]   = n_snapped
+    st.session_state["_mm_error"]       = err
+    st.session_state["_mm_status"]      = "完了" if n_snapped > 0 else "エラー"
+    _needs_rerun = True
+    _mm_ran      = True
+
+# マッチング済み座標があればそちらを使う
 active_points = st.session_state.get("_matched_points", points)
+
+# MM が再実行されたとき、edit_turns の wpt 座標を新しい trkpt 座標に同期する。
+# index は trkpt 数が変わらない限り有効なので、lat/lon だけ更新して
+# ユーザーが編集した name などはそのまま保持する。
+if _mm_ran and "edit_turns" in st.session_state:
+    for t in st.session_state["edit_turns"]:
+        idx = t.get("index", 0)
+        if idx < len(active_points):
+            t["lat"] = active_points[idx][0]
+            t["lon"] = active_points[idx][1]
+
+if st.session_state.get("_elev_status") is None:
+    _src = st.session_state.get("_elev_src", "auto")
+    elevs, src_used, n_ok = fetch_all_elevations(active_points, source=_src)
+    st.session_state["_elevations"]  = elevs
+    st.session_state["_elev_source"] = src_used
+    st.session_state["_elev_n_ok"]   = n_ok
+    st.session_state["_elev_status"] = "完了" if n_ok > 0 else "エラー"
+    _needs_rerun = True
+
+if _needs_rerun:
+    st.rerun()
 
 # ─── ルート情報 ───────────────────────────────
 dists_all = [haversine(active_points[i][0], active_points[i][1],
@@ -419,58 +458,44 @@ if not in_edit_mode:
 # サイドバー ─ マップマッチング（Valhalla）
 # ─────────────────────────────────────────────
 
+_MM_PROFILES = {
+    "自転車 (bicycle)": "cycling",
+    "徒歩・ハイキング":  "foot",
+    "車 (auto)":       "driving",
+}
+_mm_labels = list(_MM_PROFILES.keys())
+_mm_codes  = list(_MM_PROFILES.values())
+_cur_mm_code = st.session_state.get("_mm_profile", "cycling")
+_cur_mm_idx  = _mm_codes.index(_cur_mm_code) if _cur_mm_code in _mm_codes else 0
+
 st.sidebar.divider()
 st.sidebar.header("🗺️ マップマッチング")
-st.sidebar.caption("OSM道路網に各trkptをスナップします（Valhalla API使用）")
 
-mm_status = st.session_state.get("_mm_status", "未実行")
-
+mm_status = st.session_state.get("_mm_status")
 if mm_status == "完了":
     n_snapped = st.session_state.get("_mm_n_snapped", 0)
-    st.sidebar.success(f"✅ 完了 — {n_snapped}/{len(points)} 点スナップ済み")
+    st.sidebar.success(f"✅ {n_snapped}/{len(points)} 点スナップ済み")
     if st.session_state.get("_mm_error"):
-        st.sidebar.caption(f"⚠️ 一部エラー: {st.session_state['_mm_error'][:120]}")
-    if st.sidebar.button("🔄 マッチングをリセット", key="mm_reset"):
-        for k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
-                  "edit_turns", "pending_wpt"]:
-            st.session_state.pop(k, None)
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
+        st.sidebar.caption(f"⚠️ {st.session_state['_mm_error'][:120]}")
+elif mm_status == "エラー":
+    st.sidebar.error(f"❌ マッチング失敗\n{st.session_state.get('_mm_error','')[:200]}")
 else:
-    if mm_status == "エラー":
-        err_detail = st.session_state.get("_mm_error", "")
-        st.sidebar.error(f"❌ マッチング失敗\n{err_detail[:200]}")
-    else:
-        st.sidebar.info("未実行")
+    st.sidebar.info("⏳ 処理中…")
 
-    _mm_profiles = {
-        "自転車 (bicycle)":   "cycling",
-        "徒歩・ハイキング":    "foot",
-        "車 (auto)":         "driving",
-    }
-    _mm_profile_key = st.sidebar.selectbox(
-        "プロファイル", list(_mm_profiles.keys()), key="mm_profile_sel")
-    _mm_radius = st.sidebar.slider(
-        "サーチ半径（m）", 10, 100, 50, 10,
-        help="道路を探索する半径。GPS誤差が大きいルートは大きくする")
+_sel_mm = st.sidebar.selectbox("プロファイル", _mm_labels, index=_cur_mm_idx)
+st.session_state["_mm_profile"] = _MM_PROFILES[_sel_mm]
 
-    if st.sidebar.button("🗺️ マッチング実行", type="primary", key="run_mm"):
-        try:
-            matched, n_snapped, err = map_match_points(
-                points,
-                profile=_mm_profiles[_mm_profile_key],
-                radius=_mm_radius,
-            )
-        except Exception as ex:
-            st.sidebar.error(f"予期しないエラー:\n{ex}")
-            st.stop()
-        st.session_state["_matched_points"] = matched
-        st.session_state["_mm_n_snapped"]   = n_snapped
-        st.session_state["_mm_error"]       = err
-        st.session_state["_mm_status"]      = "完了" if n_snapped > 0 else "エラー"
-        # ポイントが変わるため編集モードとキャッシュをリセット
-        for k in ["edit_turns", "pending_wpt",
-                  "_elevations", "_elev_status", "_elev_source", "_elev_n_ok"]:
+_cur_radius = st.session_state.get("_mm_radius", 50)
+_mm_radius  = st.sidebar.slider("サーチ半径（m）", 10, 100, _cur_radius, 10,
+                                 help="道路を探索する半径。GPS誤差が大きいルートは大きくする")
+st.session_state["_mm_radius"] = _mm_radius
+
+if mm_status is not None:
+    st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
+    if st.sidebar.button("🔄 再処理", key="mm_reset"):
+        for k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
+                  "_elevations", "_elev_status", "_elev_source", "_elev_n_ok",
+                  "pending_wpt"]:   # edit_turns は意図的に除外（座標は再処理後に同期）
             st.session_state.pop(k, None)
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
@@ -479,46 +504,40 @@ else:
 # サイドバー ─ 標高補正
 # ─────────────────────────────────────────────
 
+_ELEV_SOURCES = {
+    "自動（日本→国土地理院、海外→Open-Meteo）": "auto",
+    "国土地理院（日本専用・高精度）":             "gsi",
+    "Open-Meteo（全世界）":                    "openmeteo",
+}
+_elev_labels = list(_ELEV_SOURCES.keys())
+_elev_codes  = list(_ELEV_SOURCES.values())
+_cur_src     = st.session_state.get("_elev_src", "auto")
+_cur_src_idx = _elev_codes.index(_cur_src) if _cur_src in _elev_codes else 0
+
 st.sidebar.divider()
 st.sidebar.header("⛰️ 標高補正")
-st.sidebar.caption("日本国内→国土地理院DEM（5m精度）、海外→Open-Meteo（90m）")
 
-elev_status = st.session_state.get("_elev_status", "未実行")
-
+elev_status = st.session_state.get("_elev_status")
 if elev_status == "完了":
     n_ok = st.session_state.get("_elev_n_ok", 0)
     src  = st.session_state.get("_elev_source", "")
-    st.sidebar.success(f"✅ 完了 — {n_ok}/{len(active_points)} 点取得（{src}）")
-    if st.sidebar.button("🔄 標高データをリセット", key="elev_reset"):
+    st.sidebar.success(f"✅ {n_ok}/{len(active_points)} 点取得（{src}）")
+elif elev_status == "エラー":
+    st.sidebar.warning("⚠️ 一部取得失敗")
+else:
+    st.sidebar.info("⏳ 処理中…")
+
+in_japan_hint = _is_in_japan(active_points[0][0], active_points[0][1])
+st.sidebar.caption(f"ルート判定: {'🇯🇵 日本' if in_japan_hint else '🌍 海外'}")
+
+_sel_src = st.sidebar.selectbox("データソース", _elev_labels, index=_cur_src_idx)
+st.session_state["_elev_src"] = _ELEV_SOURCES[_sel_src]
+
+if elev_status is not None:
+    st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
+    if st.sidebar.button("🔄 再処理", key="elev_reset"):
         for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok"]:
             st.session_state.pop(k, None)
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
-else:
-    if elev_status == "エラー":
-        st.sidebar.warning("⚠️ 一部取得失敗")
-    else:
-        st.sidebar.info("未実行")
-
-    _elev_sources = {
-        "自動（日本→国土地理院、海外→Open-Meteo）": "auto",
-        "国土地理院 API のみ（日本専用・高精度）":    "gsi",
-        "Open-Meteo のみ（全世界・低精度）":         "openmeteo",
-    }
-    _elev_src_key = st.sidebar.selectbox(
-        "データソース", list(_elev_sources.keys()), key="elev_src_sel")
-
-    in_japan_hint = _is_in_japan(active_points[0][0], active_points[0][1])
-    st.sidebar.caption(
-        f"ルート判定: {'🇯🇵 日本（国土地理院が利用可能）' if in_japan_hint else '🌍 海外（Open-Meteo）'}")
-
-    if st.sidebar.button("⛰️ 標高を取得", type="primary", key="run_elev"):
-        elevs, src_used, n_ok = fetch_all_elevations(
-            active_points, source=_elev_sources[_elev_src_key])
-        st.session_state["_elevations"]   = elevs
-        st.session_state["_elev_source"]  = src_used
-        st.session_state["_elev_n_ok"]    = n_ok
-        st.session_state["_elev_status"]  = "完了" if n_ok > 0 else "エラー"
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
