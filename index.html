@@ -413,42 +413,39 @@ function buildTrackGrads(track) {
   if (!track || track.length < 2) return [];
   if (!track.some(p => p.ele != null)) return [];
 
-  // ① 累積距離の計算
   const cumDists = [0];
   for (let i = 1; i < track.length; i++)
     cumDists.push(cumDists[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
 
-  // ② 標高のスムージング（窓幅を広めに設定）
-  const SMOOTH_R = 40; // 前後40m、計80mの広い範囲で平滑化
+  // ① スムージングの強化（ガウス分布に近い重み付け、または窓を広げる）
   const smooth = track.map((_, i) => {
-    let sum = 0, cnt = 0;
-    for (let j = 0; j < track.length; j++) {
-      if (Math.abs(cumDists[i] - cumDists[j]) <= SMOOTH_R && track[j].ele != null) {
-        sum += track[j].ele;
-        cnt++;
+    let sum = 0, weightSum = 0;
+    const R = 40; // 前後40mを参照
+    for (let j = Math.max(0, i - 10); j < Math.min(track.length, i + 10); j++) {
+      const d = Math.abs(cumDists[i] - cumDists[j]);
+      if (d <= R) {
+        // 近い点ほど重くする
+        const w = 1 - d / R;
+        sum += track[j].ele * w;
+        weightSum += w;
       }
     }
-    return cnt > 0 ? sum / cnt : null;
+    return weightSum > 0 ? sum / weightSum : track[i].ele;
   });
 
-  // ③ 勾配計算（中央差分方式：前後15mの差を見る）
-  const GRADE_WIN = 15; // 地点iの前後15m、合計30mの斜度
+  // ② 中央差分による勾配計算（見た目の位置ズレを解消）
+  const GRADE_WIN = 20; // 前後20m（計40m）で判定
   return track.map((_, i) => {
     let grade = 0;
-    if (smooth[i] != null) {
-      // 前後のインデックスを探す
-      let prevIdx = i, nextIdx = i;
-      while (prevIdx > 0 && cumDists[i] - cumDists[prevIdx] < GRADE_WIN) prevIdx--;
-      while (nextIdx < track.length - 1 && cumDists[nextIdx] - cumDists[i] < GRADE_WIN) nextIdx++;
+    let pIdx = i, nIdx = i;
+    while (pIdx > 0 && cumDists[i] - cumDists[pIdx] < GRADE_WIN) pIdx--;
+    while (nIdx < track.length - 1 && cumDists[nIdx] - cumDists[i] < GRADE_WIN) nIdx++;
 
-      const actualWin = cumDists[nextIdx] - cumDists[prevIdx];
-      // 窓幅が最低20m確保できている場合のみ計算
-      if (actualWin >= 20 && smooth[nextIdx] != null && smooth[prevIdx] != null) {
-        grade = ((smooth[nextIdx] - smooth[prevIdx]) / actualWin) * 100;
-        grade = Math.max(-25, Math.min(25, grade));
-      }
+    const dist = cumDists[nIdx] - cumDists[pIdx];
+    if (dist > 10) { // 最低10m以上の区間で計算
+      grade = ((smooth[nIdx] - smooth[pIdx]) / dist) * 100;
     }
-    return { cumDist: cumDists[i], ele: smooth[i], grade };
+    return { cumDist: cumDists[i], ele: smooth[i], grade: Math.max(-25, Math.min(25, grade)) };
   });
 }
 
@@ -529,16 +526,23 @@ function renderGradeCanvas() {
   // 同色の連続セグメントを1パスでまとめて描画（縦筋防止）
   let si = 1;
   while (si < pts.length) {
+    // 基準となる勾配（現在地点ではなく、この区間の勾配を代表させる）
     const color = gradeColor(pts[si].grade);
     let ei = si;
     while (ei < pts.length && gradeColor(pts[ei].grade) === color) ei++;
-    // si-1 ～ ei-1 が同色ブロック
+
     ctx.beginPath();
+    // 塗りつぶしの底辺（左から右へ）
     ctx.moveTo(xOf(pts[si-1].cumDist), PH);
+    // 山の形（稜線）に沿って描画
     ctx.lineTo(xOf(pts[si-1].cumDist), yOf(pts[si-1].ele));
-    for (let k = si; k < ei; k++) ctx.lineTo(xOf(pts[k].cumDist), yOf(pts[k].ele));
+    for (let k = si; k < ei; k++) {
+      ctx.lineTo(xOf(pts[k].cumDist), yOf(pts[k].ele));
+    }
+    // 塗りつぶしの右端を底に落とす
     ctx.lineTo(xOf(pts[ei-1].cumDist), PH);
     ctx.closePath();
+
     ctx.fillStyle = color;
     ctx.fill();
     si = ei;
