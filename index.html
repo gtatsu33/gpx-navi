@@ -124,6 +124,12 @@
       background: rgba(0,0,0,0.82); color: #0f0; font-family: monospace;
       font-size: 11px; padding: 6px 8px; border-radius: 8px;
       max-height: 140px; overflow-y: auto; z-index: 950;
+      display: none;
+    }
+    #grade-canvas {
+      position: absolute; bottom: 220px; left: 8px; right: 8px;
+      height: 90px; border-radius: 8px; z-index: 950;
+      background: rgba(0,0,0,0.82);
     }
   </style>
 </head>
@@ -145,6 +151,7 @@
 <div id="screen-nav" class="screen">
   <div id="map"></div>
   <button id="btn-recenter" onclick="recenter()">📍</button>
+  <canvas id="grade-canvas" height="90"></canvas>
   <div id="debug-log"></div>
   <div id="nav-panel">
     <div id="turn-primary">
@@ -187,6 +194,13 @@ const ANNOUNCE_AT  = 15;   // 「してください」発話トリガー
 const NEAR_DIST  = 25;   // m: この距離以内で「接近フラグ」ON
 const DEPART_M   = 5;    // m: 最接近後これだけ遠ざかったら離脱とみなす
 
+// 表示モード: false=勾配プロファイル, true=デバッグログ
+const SHOW_DEBUG = false;
+
+// ── 勾配プロファイル状態 ───────────────────────────────
+let trackGrads    = [];  // { cumDist, ele, grade } per trkpt
+let currentTrkIdx = 0;   // 現在地に最近接のtrkptインデックス
+
 // ── IndexedDB ─────────────────────────────────────────
 let db;
 function openDB() {
@@ -226,7 +240,8 @@ function parseGPX(text) {
     const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
     if (key === prevKey) continue;
     prevKey = key;
-    track.push({ lat, lon });
+    const ele = parseFloat(getText(el, 'ele'));
+    track.push({ lat, lon, ele: isNaN(ele) ? null : ele });
   }
 
   const turns = getEls(doc, 'wpt').map(el => ({
@@ -392,6 +407,136 @@ function dbgLog(msg) {
   el.scrollTop = el.scrollHeight;
   console.log(msg);
 }
+// ── 勾配プロファイル関連 ──────────────────────────────
+
+function buildTrackGrads(track) {
+  if (!track || track.length < 2) return [];
+  if (!track.some(p => p.ele != null)) return [];
+
+  // 7点移動平均で標高ノイズを除去
+  const r = 3;
+  const smooth = track.map((_, i) => {
+    let sum = 0, cnt = 0;
+    for (let j = Math.max(0, i-r); j <= Math.min(track.length-1, i+r); j++) {
+      if (track[j].ele != null) { sum += track[j].ele; cnt++; }
+    }
+    return cnt > 0 ? sum / cnt : null;
+  });
+
+  let cum = 0;
+  return track.map((p, i) => {
+    if (i > 0) cum += geoDist(track[i-1].lat, track[i-1].lon, p.lat, p.lon);
+    let grade = 0;
+    if (i > 0 && smooth[i] != null && smooth[i-1] != null) {
+      const d = geoDist(track[i-1].lat, track[i-1].lon, p.lat, p.lon);
+      if (d > 2) grade = Math.max(-30, Math.min(30, ((smooth[i] - smooth[i-1]) / d) * 100));
+    }
+    return { cumDist: cum, ele: smooth[i], grade };
+  });
+}
+
+function gradeColor(g) {
+  if (g < -2)  return '#4fc3f7';  // 下り: 水色
+  if (g < 3)   return '#2ed573';  // ほぼ平坦: 緑
+  if (g < 6)   return '#ffd32a';  // やや上り: 黄
+  if (g < 9)   return '#ff6348';  // 上り: オレンジ
+  if (g < 12)  return '#ff4757';  // 急坂: 赤
+  return '#7f0000';               // 激坂: エンジ
+}
+
+function updateCurrentTrkIdx(lat, lon) {
+  if (!currentRoute) return;
+  const track = currentRoute.track;
+  const s = Math.max(0, currentTrkIdx - 5);
+  const e = Math.min(track.length - 1, currentTrkIdx + 60);
+  let bestD = Infinity, bestI = currentTrkIdx;
+  for (let i = s; i <= e; i++) {
+    const d = geoDist(lat, lon, track[i].lat, track[i].lon);
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  currentTrkIdx = bestI;
+}
+
+function renderGradeCanvas() {
+  const canvas = document.getElementById('grade-canvas');
+  if (!canvas) return;
+
+  // CSSレイアウト後の実幅をcanvas座標系に反映
+  const cssW = canvas.offsetWidth;
+  if (cssW > 0 && canvas.width !== cssW) canvas.width = cssW;
+
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!trackGrads.length) {
+    ctx.fillStyle = '#666';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('標高データなし（GPXにELEタグが必要）', 8, H / 2 + 4);
+    return;
+  }
+
+  const LABEL_H = 14, PH = H - LABEL_H;
+  const LOOKAHEAD = 1000;
+  const startDist = (trackGrads[currentTrkIdx] ?? trackGrads[0]).cumDist;
+  const endDist   = startDist + LOOKAHEAD;
+
+  const pts = trackGrads.filter(p => p.cumDist >= startDist && p.cumDist <= endDist && p.ele != null);
+  if (pts.length < 2) {
+    ctx.fillStyle = '#666'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText('コース終端付近', 8, H / 2 + 4);
+    return;
+  }
+
+  const eleMin = Math.min(...pts.map(p => p.ele));
+  const eleMax = Math.max(...pts.map(p => p.ele));
+  const eleRange = Math.max(eleMax - eleMin, 10);
+  const xOf = d => ((d - startDist) / LOOKAHEAD) * W;
+  const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 10);
+
+  // 勾配色で塗りつぶしたプロファイル
+  for (let i = 1; i < pts.length; i++) {
+    const x0 = xOf(pts[i-1].cumDist), x1 = xOf(pts[i].cumDist);
+    if (x1 <= x0) continue;
+    ctx.beginPath();
+    ctx.moveTo(x0, PH); ctx.lineTo(x0, yOf(pts[i-1].ele));
+    ctx.lineTo(x1, yOf(pts[i].ele)); ctx.lineTo(x1, PH);
+    ctx.closePath();
+    ctx.fillStyle = gradeColor(pts[i].grade);
+    ctx.fill();
+  }
+
+  // 稜線
+  ctx.beginPath();
+  ctx.moveTo(xOf(pts[0].cumDist), yOf(pts[0].ele));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(xOf(pts[i].cumDist), yOf(pts[i].ele));
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // 現在地ライン（左端）
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(2, 0); ctx.lineTo(2, PH); ctx.stroke();
+
+  // 距離ラベル
+  ctx.fillStyle = '#999'; ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';   ctx.fillText('現在', 5, H - 2);
+  ctx.textAlign = 'center'; ctx.fillText('500m', W / 2, H - 2);
+  ctx.textAlign = 'right';  ctx.fillText('1km', W - 2, H - 2);
+
+  // 現在勾配（右上に大きく）
+  const g = trackGrads[currentTrkIdx]?.grade;
+  if (g != null) {
+    const sign = g > 0 ? '+' : '';
+    ctx.fillStyle = gradeColor(g);
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${sign}${g.toFixed(1)}%`, W - 4, 16);
+  }
+}
+
 // 通過判定ステート（targetIdx が進むたびにリセット）
 let nearTarget    = false;
 let minDistTarget = Infinity;
@@ -411,6 +556,8 @@ async function startNavigation(routeId) {
   minDistTarget = Infinity;
   prevDistNext  = Infinity;
   followMode = true;
+  currentTrkIdx = 0;
+  trackGrads = buildTrackGrads(currentRoute.track);
   voiceEnabled = true;
   document.getElementById('btn-voice').textContent = '🔊 音声';
   document.getElementById('btn-voice').classList.remove('muted');
@@ -436,6 +583,9 @@ async function startNavigation(routeId) {
 function initMap() {
   if (map) { map.remove(); map = null; }
   targetMarker = null;
+  // デバッグ/勾配の表示切り替え
+  document.getElementById('debug-log').style.display   = SHOW_DEBUG ? 'block' : 'none';
+  document.getElementById('grade-canvas').style.display = SHOW_DEBUG ? 'none'  : 'block';
   const track = currentRoute.track;
   map = L.map('map', { zoomControl: true }).setView([track[0].lat, track[0].lon], 15);
   L.tileLayer(TILE_URL, { attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19, maxNativeZoom: 18 }).addTo(map);
@@ -583,6 +733,8 @@ function onGPSUpdate(pos) {
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
+  updateCurrentTrkIdx(lat, lon);
+  if (!SHOW_DEBUG) renderGradeCanvas();
   updateNavPanel(lat, lon);
 }
 
