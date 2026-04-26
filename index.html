@@ -281,6 +281,17 @@ async function prefetchTiles(track, onProgress) {
 // ── List Screen ───────────────────────────────────────
 function openFilePicker() { document.getElementById('file-input').click(); }
 
+// turns[] の各wptに trkIdx を付加する
+function buildWptTrkMapping(track, turns) {
+  return turns.map(wp => {
+    let bestIdx = 0, bestD = Infinity;
+    for (let i = 0; i < track.length; i++) {
+      const d = geoDist(wp.lat, wp.lon, track[i].lat, track[i].lon);
+      if (d < bestD) { bestD = d; bestIdx = i; }
+    }
+    return { ...wp, trkIdx: bestIdx };
+  });
+}
 async function handleFileImport(event) {
   const file = event.target.files[0];
   if (!file) return;
@@ -295,7 +306,7 @@ async function handleFileImport(event) {
   for (let i = 1; i < parsed.track.length; i++)
     totalDist += geoDist(parsed.track[i-1].lat, parsed.track[i-1].lon, parsed.track[i].lat, parsed.track[i].lon);
 
-  const route = { name: parsed.name, distKm: (totalDist/1000).toFixed(1), track: parsed.track, turns: parsed.turns, importedAt: Date.now() };
+  const route = { name: parsed.name, distKm: (totalDist/1000).toFixed(1), track: parsed.track, turns: buildWptTrkMapping(parsed.track, parsed.turns), importedAt: Date.now() };
   await dbSave(route);
   await renderRouteList();
   showToast(`「${route.name}」を追加 (${parsed.turns.length}ターン)`);
@@ -365,6 +376,7 @@ let voiceEnabled = true, followMode = true;
 // '100' = 100m以内で発話
 // '15'  = 15m以内で発話
 let announcePhases = [];
+let phasesBuilt = false;  // ← ここに追加
 let wakeLock = null;  // Screen Wake Lock
 
 // ── 画面ログ（デバッグ用） ───────────────────────────
@@ -390,6 +402,8 @@ async function startNavigation(routeId) {
   unlockAudio(); // awaitより前：ユーザージェスチャーのコンテキスト内で音声を解放
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
+  phasesBuilt = false;
+
   if (!currentRoute) return;
 
   announcePhases = [];
@@ -491,6 +505,7 @@ function updateTargetMarker() {
 function buildAnnouncePhases(d0, wpName, isGoal) {
   const label = isGoal ? 'ゴール' : wpName;
   const round50 = d => Math.round(d / 50) * 50;
+  phasesBuilt = true;  // ← 追加
 
   if (d0 > 300) {
     // ①即発話 ②300m付近 ③100m ④15m
@@ -560,7 +575,7 @@ function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
   posMarker.setLatLng([lat, lon]);
   // GPS初回取得時、まだフェーズが構築されていなければ現在地から構築
-  if (announcePhases.length === 0 && targetIdx < waypoints.length) {
+  if (!phasesBuilt && targetIdx < waypoints.length) {
     const wp = waypoints[targetIdx];
     const d0 = geoDist(lat, lon, wp.lat, wp.lon);
     buildAnnouncePhases(d0, wp.name, wp.isGoal);
@@ -597,6 +612,7 @@ function checkWaypointAdvance(lat, lon) {
         document.getElementById('turn-next').innerHTML =
           '<span class="next-label">次：</span><span class="next-val">コース完走！</span>';
         targetIdx++;
+        phasesBuilt = false;  // ← 追加
         changed = true;
       }
       break;
@@ -689,15 +705,38 @@ function setNavMsg(arrow, dist, dir) {
 function rerouteToNearest() {
   if (!currentRoute || !posMarker) return;
   dbgLog(`[REROUTE] called, targetIdx was ${targetIdx}`);
-  const pos = posMarker.getLatLng();
-  let bestTI = 0, bestD = Infinity;
-  for (let ti = 0; ti < waypoints.length; ti++) {
-    const d = geoDist(pos.lat, pos.lng, waypoints[ti].lat, waypoints[ti].lon);
-    if (d < bestD) { bestD = d; bestTI = ti; }
+  const pos   = posMarker.getLatLng();
+  const track = currentRoute.track;
+
+  // ① 現在地に最も近いtrkptのインデックスを求める
+  let nearestTrkIdx = 0, bestD = Infinity;
+  for (let i = 0; i < track.length; i++) {
+    const d = geoDist(pos.lat, pos.lng, track[i].lat, track[i].lon);
+    if (d < bestD) { bestD = d; nearestTrkIdx = i; }
   }
-  targetIdx = bestTI;
+  dbgLog(`[REROUTE] nearest trkpt[${nearestTrkIdx}] d=${Math.round(bestD)}m`);
+
+  // ② 各wptのtrkIdxと比較して、nearestTrkIdx以降で最初のwptを選ぶ
+  // （ゴールセンチネルはtrkIdxを持たないため除外し、デフォルトはゴール）
+  let bestWpIdx = waypoints.length - 1;
+  for (let wi = 0; wi < waypoints.length; wi++) {
+    const wp = waypoints[wi];
+    if (wp.isGoal) break;  // ゴールセンチネルはスキップ
+    if (wp.trkIdx >= nearestTrkIdx) { bestWpIdx = wi; break; }
+  }
+  dbgLog(`[REROUTE] → wpt[${bestWpIdx}] "${waypoints[bestWpIdx].name}"`);
+
+  // 通過判定ステートをリセット
+  nearTarget    = false;
+  minDistTarget = Infinity;
+  prevDistNext  = Infinity;
+  phasesBuilt   = false;
+
+  targetIdx = bestWpIdx;
   updateTargetMarker();
-  showToast(`「${waypoints[bestTI].name}」へ復帰（${Math.round(bestD)}m先）`);
+  const wp = waypoints[bestWpIdx];
+  const dWp = geoDist(pos.lat, pos.lng, wp.lat, wp.lon);
+  showToast(`「${wp.name}」へ復帰（${Math.round(dWp)}m先）`);
   updateNavPanel(pos.lat, pos.lng);
 }
 
