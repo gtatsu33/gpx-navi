@@ -413,25 +413,35 @@ function buildTrackGrads(track) {
   if (!track || track.length < 2) return [];
   if (!track.some(p => p.ele != null)) return [];
 
-  // 7点移動平均で標高ノイズを除去
-  const r = 3;
+  // ① 累積距離を先に計算（スムージングでも使うため）
+  const cumDists = [0];
+  for (let i = 1; i < track.length; i++)
+    cumDists.push(cumDists[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
+
+  // ② 距離ベースのスムージング（±30m 範囲の平均）
+  // 点間隔に依存しないため、密なGPXでも粗いGPXでも同じ実距離で平均する
+  const SMOOTH_R = 30; // m
   const smooth = track.map((_, i) => {
     let sum = 0, cnt = 0;
-    for (let j = Math.max(0, i-r); j <= Math.min(track.length-1, i+r); j++) {
+    for (let j = i; j >= 0 && cumDists[i] - cumDists[j] <= SMOOTH_R; j--)
       if (track[j].ele != null) { sum += track[j].ele; cnt++; }
-    }
+    for (let j = i + 1; j < track.length && cumDists[j] - cumDists[i] <= SMOOTH_R; j++)
+      if (track[j].ele != null) { sum += track[j].ele; cnt++; }
     return cnt > 0 ? sum / cnt : null;
   });
 
-  let cum = 0;
-  return track.map((p, i) => {
-    if (i > 0) cum += geoDist(track[i-1].lat, track[i-1].lon, p.lat, p.lon);
+  // ③ 勾配は前方25mウィンドウで計算（距離ベース）
+  const GRADE_WIN = 25;
+  return track.map((_, i) => {
     let grade = 0;
-    if (i > 0 && smooth[i] != null && smooth[i-1] != null) {
-      const d = geoDist(track[i-1].lat, track[i-1].lon, p.lat, p.lon);
-      if (d > 2) grade = Math.max(-30, Math.min(30, ((smooth[i] - smooth[i-1]) / d) * 100));
+    if (smooth[i] != null) {
+      let j = i;
+      while (j < track.length - 1 && cumDists[j] - cumDists[i] < GRADE_WIN) j++;
+      const win = cumDists[j] - cumDists[i];
+      if (win >= 5 && smooth[j] != null)
+        grade = Math.max(-30, Math.min(30, ((smooth[j] - smooth[i]) / win) * 100));
     }
-    return { cumDist: cum, ele: smooth[i], grade };
+    return { cumDist: cumDists[i], ele: smooth[i], grade };
   });
 }
 
@@ -495,16 +505,22 @@ function renderGradeCanvas() {
   const xOf = d => ((d - startDist) / LOOKAHEAD) * W;
   const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 10);
 
-  // 勾配色で塗りつぶしたプロファイル
-  for (let i = 1; i < pts.length; i++) {
-    const x0 = xOf(pts[i-1].cumDist), x1 = xOf(pts[i].cumDist);
-    if (x1 <= x0) continue;
+  // 同色の連続セグメントを1パスでまとめて描画（縦筋防止）
+  let si = 1;
+  while (si < pts.length) {
+    const color = gradeColor(pts[si].grade);
+    let ei = si;
+    while (ei < pts.length && gradeColor(pts[ei].grade) === color) ei++;
+    // si-1 ～ ei-1 が同色ブロック
     ctx.beginPath();
-    ctx.moveTo(x0, PH); ctx.lineTo(x0, yOf(pts[i-1].ele));
-    ctx.lineTo(x1, yOf(pts[i].ele)); ctx.lineTo(x1, PH);
+    ctx.moveTo(xOf(pts[si-1].cumDist), PH);
+    ctx.lineTo(xOf(pts[si-1].cumDist), yOf(pts[si-1].ele));
+    for (let k = si; k < ei; k++) ctx.lineTo(xOf(pts[k].cumDist), yOf(pts[k].ele));
+    ctx.lineTo(xOf(pts[ei-1].cumDist), PH);
     ctx.closePath();
-    ctx.fillStyle = gradeColor(pts[i].grade);
+    ctx.fillStyle = color;
     ctx.fill();
+    si = ei;
   }
 
   // 稜線
