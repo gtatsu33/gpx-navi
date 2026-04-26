@@ -150,7 +150,7 @@
 
 <div id="screen-nav" class="screen">
   <div id="map"></div>
-  <button id="btn-recenter" onclick="recenter()">📍</button>
+  <button id="btn-recenter" onclick="recenter()"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg></button>
   <canvas id="grade-canvas" height="90"></canvas>
   <div id="debug-log"></div>
   <div id="nav-panel">
@@ -593,10 +593,10 @@ function initMap() {
   // trkpt でルートを描画
   L.polyline(track.map(p => [p.lat, p.lon]), { color: '#00d4ff', weight: 5, opacity: 0.75 }).addTo(map);
   L.marker([track[0].lat, track[0].lon],
-    { icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>', iconSize:[22,22], iconAnchor:[11,11] }) })
+    { icon: L.divIcon({ html: '<div style="font-size:22px">🟢</div>', iconSize:[22,22], iconAnchor:[11,11], className:'' }) })
     .bindTooltip('スタート').addTo(map);
   L.marker([track[track.length-1].lat, track[track.length-1].lon],
-    { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11] }) })
+    { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11], className:'' }) })
     .bindTooltip('ゴール').addTo(map);
 
   // ターンポイントをマップに描画（ゴールセンチネルは除く）
@@ -609,7 +609,7 @@ function initMap() {
   posMarker = L.marker([track[0].lat, track[0].lon], {
     icon: L.divIcon({
       html: '<div style="width:18px;height:18px;background:#ff4757;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(255,71,87,0.6)"></div>',
-      iconSize:[18,18], iconAnchor:[9,9]
+      iconSize:[18,18], iconAnchor:[9,9], className:''
     }), zIndexOffset: 1000
   });
 
