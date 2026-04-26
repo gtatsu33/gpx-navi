@@ -417,14 +417,13 @@ function buildTrackGrads(track) {
   for (let i = 1; i < track.length; i++)
     cumDists.push(cumDists[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
 
-  // ① スムージングの強化（ガウス分布に近い重み付け、または窓を広げる）
+  // ① スムージング（窓幅を広げてノイズを除去）
   const smooth = track.map((_, i) => {
     let sum = 0, weightSum = 0;
     const R = 40; // 前後40mを参照
-    for (let j = Math.max(0, i - 10); j < Math.min(track.length, i + 10); j++) {
+    for (let j = Math.max(0, i - 15); j < Math.min(track.length, i + 15); j++) {
       const d = Math.abs(cumDists[i] - cumDists[j]);
       if (d <= R) {
-        // 近い点ほど重くする
         const w = 1 - d / R;
         sum += track[j].ele * w;
         weightSum += w;
@@ -442,13 +441,16 @@ function buildTrackGrads(track) {
     while (nIdx < track.length - 1 && cumDists[nIdx] - cumDists[i] < GRADE_WIN) nIdx++;
 
     const dist = cumDists[nIdx] - cumDists[pIdx];
-    if (dist > 10) { // 最低10m以上の区間で計算
+    if (dist > 15) { // 最低15m以上の区間で計算
       grade = ((smooth[nIdx] - smooth[pIdx]) / dist) * 100;
     }
-    return { cumDist: cumDists[i], ele: smooth[i], grade: Math.max(-25, Math.min(25, grade)) };
+    return { 
+      cumDist: cumDists[i], 
+      ele: smooth[i], 
+      grade: Math.max(-25, Math.min(25, grade)) 
+    };
   });
 }
-
 
 
 function gradeColor(g) {
