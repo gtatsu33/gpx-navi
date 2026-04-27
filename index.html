@@ -598,13 +598,13 @@ let prevDistNext  = Infinity;
 function createArrowIcon(heading) {
   const deg = (heading != null && !isNaN(heading)) ? heading : (currentHeading ?? 0);
   return L.divIcon({
-    html: `<div style="width:48px;height:48px;transform:rotate(${deg}deg);transform-origin:center;transition:transform 0.25s ease">
-      <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 32 32">
+    html: `<div style="width:38px;height:38px;transform:rotate(${deg}deg);transform-origin:center;transition:transform 0.25s ease">
+      <svg xmlns="http://www.w3.org/2000/svg" width="38" height="38" viewBox="0 0 32 32">
         <defs><filter id="arr-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="0" stdDeviation="2.5" flood-color="rgba(0,0,0,0.75)"/></filter></defs>
         <polygon points="16,2 26,28 16,22 6,28" fill="#1a52d5" stroke="#fff" stroke-width="4" stroke-linejoin="round" paint-order="stroke fill" filter="url(#arr-shadow)"/>
       </svg>
     </div>`,
-    iconSize: [48, 48], iconAnchor: [24, 24], className: ''
+    iconSize: [38, 38], iconAnchor: [19, 19], className: ''
   });
 }
 
