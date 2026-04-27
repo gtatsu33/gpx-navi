@@ -398,6 +398,7 @@ const getTurnStyle = name => TURN_STYLE[name] || TURN_STYLE['直進維持'];
 // trkpt はマップ描画専用。ナビゲーションは wpt の座標だけで完結する。
 // trackIdx / nearestIdx / cumDist は一切使わない。
 let map = null, posMarker = null, targetMarker = null, currentRoute = null, watchId = null;
+let currentHeading = null;
 
 // waypoints[] : wpt をGPX順（=ルート順）に並べたもの + ゴールセンチネル
 // 各要素: { lat, lon, name, isGoal }
@@ -593,6 +594,19 @@ let nearTarget    = false;
 let minDistTarget = Infinity;
 let prevDistNext  = Infinity;
 
+// ── 現在地アイコン（矢羽根） ──────────────────────────
+function createArrowIcon(heading) {
+  const deg = (heading != null && !isNaN(heading)) ? heading : (currentHeading ?? 0);
+  return L.divIcon({
+    html: `<div style="width:32px;height:32px;transform:rotate(${deg}deg);transform-origin:center;transition:transform 0.25s ease">
+      <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <polygon points="16,2 26,28 16,22 6,28" fill="#ff4757" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+    </div>`,
+    iconSize: [32, 32], iconAnchor: [16, 16], className: ''
+  });
+}
+
 // ── Navigation Start ──────────────────────────────────
 function startNavigationFromCard(id) {
   const rev = document.getElementById(`reverse-${id}`)?.checked ?? false;
@@ -677,11 +691,9 @@ function initMap() {
      .bindTooltip(`${i+1}. ${s.arrow} ${wp.name}`).addTo(map);
   });
 
+  currentHeading = null;
   posMarker = L.marker([track[0].lat, track[0].lon], {
-    icon: L.divIcon({
-      html: '<div style="width:18px;height:18px;background:#ff4757;border:3px solid #fff;border-radius:50%;box-shadow:0 2px 8px rgba(255,71,87,0.6)"></div>',
-      iconSize:[18,18], iconAnchor:[9,9], className:''
-    }), zIndexOffset: 1000
+    icon: createArrowIcon(null), zIndexOffset: 1000
   });
 
   map.on('dragstart', () => { followMode = false; });
@@ -794,7 +806,12 @@ function startGPS() {
 
 function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  const heading = pos.coords.heading;
   posMarker.setLatLng([lat, lon]);
+  if (heading != null && !isNaN(heading)) {
+    currentHeading = heading;
+    posMarker.setIcon(createArrowIcon(heading));
+  }
   // GPS初回取得時、まだフェーズが構築されていなければ現在地から構築
   if (!phasesBuilt && targetIdx < waypoints.length) {
     const wp = waypoints[targetIdx];
