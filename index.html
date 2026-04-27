@@ -248,11 +248,15 @@ function parseGPX(text) {
     track.push({ lat, lon, ele: isNaN(ele) ? null : ele });
   }
 
-  const turns = getEls(doc, 'wpt').map(el => ({
-    lat:  parseFloat(el.getAttribute('lat')),
-    lon:  parseFloat(el.getAttribute('lon')),
-    name: getText(el, 'name') || getText(el, 'n') || '通過点',
-  })).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
+  const turns = getEls(doc, 'wpt').map(el => {
+    const bc = parseFloat((getText(el, 'desc') || '').replace('bearing_change:', ''));
+    return {
+      lat:  parseFloat(el.getAttribute('lat')),
+      lon:  parseFloat(el.getAttribute('lon')),
+      name: getText(el, 'name') || getText(el, 'n') || '通過点',
+      bearingChange: bc,
+    };
+  }).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
 
   return { name, track, turns };
 }
@@ -373,6 +377,14 @@ async function deleteRoute(id) {
 const escHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // ── Turn Styles ───────────────────────────────────────
+function bcToTurnName(bc) {
+  if (bc >  45) return '右折';
+  if (bc >  15) return 'やや右';
+  if (bc < -45) return '左折';
+  if (bc < -15) return 'やや左';
+  return '直進維持';
+}
+
 const TURN_STYLE = {
   '右折':     { arrow: '⇒', color: 'var(--right)',  bg: '#2a0808' },
   '左折':     { arrow: '⇐', color: 'var(--left)',   bg: '#08112a' },
@@ -601,7 +613,7 @@ async function startNavigation(routeId, isReverse = false) {
       ...currentRoute,
       track: currentRoute.track.slice().reverse(),
       turns: currentRoute.turns.slice().reverse().map(t => ({
-        ...t, trkIdx: n - 1 - t.trkIdx
+        ...t, trkIdx: n - 1 - t.trkIdx, name: bcToTurnName(-t.bearingChange)
       }))
     };
   }
@@ -660,7 +672,7 @@ function initMap() {
 
   // ターンポイントをマップに描画（ゴールセンチネルは除く）
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
-    const s = getTurnStyle(wp.name);
+    const s = getTurnStyle(bcToTurnName(wp.bearingChange));
     L.circleMarker([wp.lat, wp.lon], { radius:7, color:s.color, fillColor:s.color, fillOpacity:0.9, weight:2 })
      .bindTooltip(`${i+1}. ${s.arrow} ${wp.name}`).addTo(map);
   });
@@ -879,7 +891,7 @@ function updateNavPanel(lat, lon) {
   if (targetIdx >= waypoints.length) return;
 
   const wp = waypoints[targetIdx];
-  const s  = wp.isGoal ? getTurnStyle('直進維持') : getTurnStyle(wp.name);
+  const s  = wp.isGoal ? getTurnStyle('直進維持') : getTurnStyle(bcToTurnName(wp.bearingChange));
   // trkpt 不使用。GPS座標から wpt への直線距離で表示。
   const dist = geoDist(lat, lon, wp.lat, wp.lon);
 
@@ -893,7 +905,7 @@ function updateNavPanel(lat, lon) {
   // 次のウェイポイント情報
   const next = waypoints[targetIdx + 1];
   if (next && !wp.isGoal) {
-    const ns  = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(next.name);
+    const ns  = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(bcToTurnName(next.bearingChange));
     const nd  = geoDist(lat, lon, next.lat, next.lon);
     document.getElementById('turn-next').innerHTML = next.isGoal
       ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
