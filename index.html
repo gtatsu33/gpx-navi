@@ -349,13 +349,18 @@ async function renderRouteList() {
     return;
   }
   el.innerHTML = routes.reverse().map(r => `
-    <div class="route-card" onclick="startNavigation(${r.id})">
+    <div class="route-card" onclick="startNavigationFromCard(${r.id})">
       <div class="route-icon">🚴</div>
       <div class="route-info">
         <div class="route-name">${escHtml(r.name)}</div>
         <div class="route-meta"><span>${r.distKm} km</span> &nbsp;|&nbsp; ターン ${r.turns.length}件</div>
       </div>
-      <button class="btn-delete" onclick="event.stopPropagation(); deleteRoute(${r.id})">削除</button>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
+        <label onclick="event.stopPropagation()" style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#aaa;font-size:13px;white-space:nowrap">
+          <input type="checkbox" id="reverse-${r.id}"> 逆走
+        </label>
+        <button class="btn-delete" onclick="event.stopPropagation(); deleteRoute(${r.id})">削除</button>
+      </div>
     </div>`).join('');
 }
 
@@ -577,13 +582,29 @@ let minDistTarget = Infinity;
 let prevDistNext  = Infinity;
 
 // ── Navigation Start ──────────────────────────────────
-async function startNavigation(routeId) {
+function startNavigationFromCard(id) {
+  const rev = document.getElementById(`reverse-${id}`)?.checked ?? false;
+  startNavigation(id, rev);
+}
+
+async function startNavigation(routeId, isReverse = false) {
   unlockAudio(); // awaitより前：ユーザージェスチャーのコンテキスト内で音声を解放
   const routes = await dbGetAll();
   currentRoute = routes.find(r => r.id === routeId);
   phasesBuilt = false;
 
   if (!currentRoute) return;
+
+  if (isReverse) {
+    const n = currentRoute.track.length;
+    currentRoute = {
+      ...currentRoute,
+      track: currentRoute.track.slice().reverse(),
+      turns: currentRoute.turns.slice().reverse().map(t => ({
+        ...t, trkIdx: n - 1 - t.trkIdx
+      }))
+    };
+  }
 
   announcePhases = [];
   nearTarget    = false;
