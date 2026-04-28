@@ -486,6 +486,24 @@ function gradeColor(g) {
 function updateCurrentTrkIdx(lat, lon) {
   if (!currentRoute) return;
   const track = currentRoute.track;
+
+    // 現在のインデックスから現在地への距離を確認
+  const distFromCurrent = geoDist(lat, lon,
+      track[currentTrkIdx].lat, track[currentTrkIdx].lon);
+
+  // 現在地が探索窓から大きく外れている場合はフルサーチ
+  // （逆走＋ゴール付近起動など、初期位置が大きくずれているケースに対応）
+  const FULL_SEARCH_THRESHOLD = 200; // m
+  if (distFromCurrent > FULL_SEARCH_THRESHOLD) {
+    let bestD = Infinity, bestI = 0;
+    for (let i = 0; i < track.length; i++) {
+      const d = geoDist(lat, lon, track[i].lat, track[i].lon);
+      if (d < bestD) { bestD = d; bestI = i; }
+    }
+    currentTrkIdx = bestI;
+    return;
+  }
+  
   const s = Math.max(0, currentTrkIdx - 5);
   const e = Math.min(track.length - 1, currentTrkIdx + 60);
   let bestD = Infinity, bestI = currentTrkIdx;
@@ -1059,11 +1077,14 @@ function toggleGrade() {
     canvas.style.display = 'block';
     btn.classList.add('grade-on');
     // 現在地が取得済みならインデックスを即時更新して描画
-    if (posMarker && map && map.hasLayer(posMarker)) {
-      const pos = posMarker.getLatLng();
-      updateCurrentTrkIdx(pos.lat, pos.lng);
-    }
-    renderGradeCanvas();
+    requestAnimationFrame(() => {
+      if (posMarker && map && map.hasLayer(posMarker)) {
+        const pos = posMarker.getLatLng();
+        updateCurrentTrkIdx(pos.lat, pos.lng);
+      }
+      renderGradeCanvas();
+    });
+
   } else {
     canvas.style.display = 'none';
     btn.classList.remove('grade-on');
