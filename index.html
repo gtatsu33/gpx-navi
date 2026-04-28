@@ -547,8 +547,8 @@ function renderGradeCanvas() {
   }
 
   const eleMin = Math.min(...pts.map(p => p.ele));
-  const eleMax = Math.max(...pts.map(p => p.ele));
-  const eleRange = Math.max(eleMax - eleMin, 10);
+  // const eleMax = Math.max(...pts.map(p => p.ele));
+  const eleRange = 120;
   const xOf = d => Math.round(((d - startDist) / LOOKAHEAD) * W);
   const yOf = e => PH - 2 - ((e - eleMin) / eleRange) * (PH - 20);
 
