@@ -723,11 +723,25 @@ with col_list:
             col_a, col_c = st.columns(2)
             with col_a:
                 if st.button("➕ 追加", type="primary", disabled=not (new_name or "").strip()):
+                    idx = pending["index"]
+                    sm = smooth_val
+                    if sm <= idx < len(active_points) - sm:
+                        b_in  = calculate_bearing(
+                            active_points[idx - sm][0], active_points[idx - sm][1],
+                            active_points[idx][0],      active_points[idx][1],
+                        )
+                        b_out = calculate_bearing(
+                            active_points[idx][0],      active_points[idx][1],
+                            active_points[idx + sm][0], active_points[idx + sm][1],
+                        )
+                        wpt_delta = angle_diff(b_in, b_out)
+                    else:
+                        wpt_delta = None
                     new_wpt = {
                         "lat":   pending["lat"],
                         "lon":   pending["lon"],
-                        "delta": None,
-                        "index": pending["index"],
+                        "delta": wpt_delta,
+                        "index": idx,
                         "name":  new_name.strip(),
                     }
                     turns_list = st.session_state["edit_turns"]
