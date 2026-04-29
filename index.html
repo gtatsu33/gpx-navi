@@ -669,7 +669,7 @@ async function startNavigation(routeId, isReverse = false) {
   // trkpt へのマッピング不要。座標をそのまま使う。
   waypoints = [
     ...currentRoute.turns.map(t => ({
-      lat: t.lat, lon: t.lon, name: t.name, isGoal: false, trkIdx: t.trkIdx
+      lat: t.lat, lon: t.lon, name: t.name, bearingChange: t.bearingChange, isGoal: false, trkIdx: t.trkIdx
     })),
     { lat: track[track.length - 1].lat, lon: track[track.length - 1].lon,
       name: 'ゴール', isGoal: true }
@@ -945,7 +945,7 @@ function updateNavPanel(lat, lon) {
   document.getElementById('turn-distance').style.color        = s.color;
   document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${wp.name}`;
 
-  // 次のウェイポイント情報
+  // 次のウェイポイント情報waypoints
   const next = waypoints[targetIdx + 1];
   if (next && !wp.isGoal) {
     const ns  = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(bcToTurnName(next.bearingChange));
