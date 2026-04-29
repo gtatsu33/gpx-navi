@@ -384,6 +384,17 @@ function bcToTurnName(bc) {
   if (bc < -15) return 'やや左';
   return '直進維持';
 }
+// ── Turn Name Reverse ─────────────────────────────
+function reverseTurnName(name) {
+  if (name.includes('やや右')) return name.replace('やや右', 'やや左');
+  if (name.includes('やや左')) return name.replace('やや左', 'やや右');
+  if (name.includes('右折'))   return name.replace('右折', '左折');
+  if (name.includes('左折'))   return name.replace('左折', '右折');
+  if (name.includes('右') || name.includes('左')) {
+    return name.replace('右', '§').replace('左', '右').replace('§', '左');
+  }
+  return name;
+}
 
 const TURN_STYLE = {
   '右折':     { arrow: '⇒', color: 'var(--right)',  bg: '#2a0808' },
@@ -646,7 +657,7 @@ async function startNavigation(routeId, isReverse = false) {
       ...currentRoute,
       track: currentRoute.track.slice().reverse(),
       turns: currentRoute.turns.slice().reverse().map(t => ({
-        ...t, trkIdx: n - 1 - t.trkIdx, name: bcToTurnName(-t.bearingChange)
+        ...t, trkIdx: n - 1 - t.trkIdx, name: reverseTurnName(t.name)
       }))
     };
   }
