@@ -191,7 +191,7 @@ const PREFETCH_ZOOMS = [13, 14, 15];
 // 音声案内距離
 const ANNOUNCE_300 = 300;  // 「約Xm先」2回目の発話トリガー
 const ANNOUNCE_100 = 100;  // 「まもなく」発話トリガー
-const ANNOUNCE_AT  = 15;   // 「してください」発話トリガー
+const ANNOUNCE_AT  = 25;   // 「してください」発話トリガー
 
 // 到達判定
 const NEAR_DIST  = 25;   // m: この距離以内で「接近フラグ」ON
@@ -923,6 +923,13 @@ function checkWaypointAdvance(lat, lon) {
 
 // ── パネル更新 ────────────────────────────────────────
 function updateNavPanel(lat, lon) {
+    // 先に現在のターゲットとの距離を計算して音声を発火
+  if (targetIdx < waypoints.length) {
+    const wp = waypoints[targetIdx];
+    const dist = geoDist(lat, lon, wp.lat, wp.lon);
+    checkAnnounce(dist);
+  }
+
   checkWaypointAdvance(lat, lon);
   if (targetIdx >= waypoints.length) return;
 
@@ -951,8 +958,6 @@ function updateNavPanel(lat, lon) {
       `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
   }
 
-  // 音声案内フェーズチェック
-  checkAnnounce(dist);
 }
 
 function setNavMsg(arrow, dist, dir) {
