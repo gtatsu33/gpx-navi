@@ -2,7 +2,7 @@
 GPX ターン検出・強化ツール
 点X の前後の点 A,B のベアリング差でコーナーを検出する
 手動編集機能付き（追加・削除・名前変更）
-マップマッチング（OSRM）・標高補正（国土地理院 / Open-Meteo）対応
+マップマッチング（Valhalla）・標高補正（国土地理院 / Open-Meteo）対応
 """
 
 import streamlit as st
@@ -214,10 +214,10 @@ def fetch_all_elevations(points, source="auto"):
     source: "auto" | "gsi" | "openmeteo"
     戻り値: (elevations: list[float|None], source_used: str, n_ok: int)
     """
-    n         = len(points)
+    n          = len(points)
     elevations = [None] * n
-    in_japan  = _is_in_japan(points[0][0], points[0][1]) if points else False
-    use_gsi   = (source == "gsi") or (source == "auto" and in_japan)
+    in_japan   = _is_in_japan(points[0][0], points[0][1]) if points else False
+    use_gsi    = (source == "gsi") or (source == "auto" and in_japan)
     src_label  = "国土地理院" if use_gsi else "Open-Meteo"
 
     prog = st.progress(0, text=f"標高データ取得中（{src_label}）…")
@@ -294,7 +294,7 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
             if i < len(elevations) and elevations[i] is not None:
                 pt.elevation = elevations[i]
 
-    # ウェイポイントを再構築
+    # ターンポイントを再構築
     enhanced.waypoints = []
     for t in turns:
         name  = t.get("name") or turn_label(t["delta"])[0]
@@ -332,6 +332,8 @@ if len(points) < 6:
     st.error("トラックポイントが少なすぎます。")
     st.stop()
 
+_has_wpts = len(gpx_parsed.waypoints) > 0
+
 # ファイルが変わったらセッション状態をリセット
 _STATE_KEYS = [
     "edit_turns", "pending_wpt", "_handled_click", "_handled_tooltip",
@@ -345,31 +347,31 @@ if st.session_state.get("_file_name") != uploaded.name:
         st.session_state.pop(k, None)
 
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
-in_edit_mode = "edit_turns" in st.session_state
 
 # ─────────────────────────────────────────────
-# ファイル読み込み後の自動処理
+# 自動処理（マップマッチング・標高補正）
 # ─────────────────────────────────────────────
 _needs_rerun = False
 _mm_ran      = False
 
 if st.session_state.get("_mm_status") is None:
-    _profile = st.session_state.get("_mm_profile", "cycling")
-    _radius  = st.session_state.get("_mm_radius",  50)
-    matched, n_snapped, err = map_match_points(points, profile=_profile, radius=_radius)
-    st.session_state["_matched_points"] = matched
-    st.session_state["_mm_n_snapped"]   = n_snapped
-    st.session_state["_mm_error"]       = err
-    st.session_state["_mm_status"]      = "完了" if n_snapped > 0 else "エラー"
-    _needs_rerun = True
-    _mm_ran      = True
+    if _has_wpts and not st.session_state.pop("_force_mm", False):
+        st.session_state["_matched_points"] = list(points)
+        st.session_state["_mm_status"]      = "スキップ"
+    else:
+        _profile = st.session_state.get("_mm_profile", "cycling")
+        _radius  = st.session_state.get("_mm_radius",  50)
+        matched, n_snapped, err = map_match_points(points, profile=_profile, radius=_radius)
+        st.session_state["_matched_points"] = matched
+        st.session_state["_mm_n_snapped"]   = n_snapped
+        st.session_state["_mm_error"]       = err
+        st.session_state["_mm_status"]      = "完了" if n_snapped > 0 else "エラー"
+        _needs_rerun = True
+        _mm_ran      = True
 
-# マッチング済み座標があればそちらを使う
 active_points = st.session_state.get("_matched_points", points)
 
-# MM が再実行されたとき、edit_turns の wpt 座標を新しい trkpt 座標に同期する。
-# index は trkpt 数が変わらない限り有効なので、lat/lon だけ更新して
-# ユーザーが編集した name などはそのまま保持する。
+# MM 再実行時、edit_turns の wpt 座標を新しい trkpt 座標に同期する
 if _mm_ran and "edit_turns" in st.session_state:
     for t in st.session_state["edit_turns"]:
         idx = t.get("index", 0)
@@ -378,16 +380,52 @@ if _mm_ran and "edit_turns" in st.session_state:
             t["lon"] = active_points[idx][1]
 
 if st.session_state.get("_elev_status") is None:
-    _src = st.session_state.get("_elev_src", "auto")
-    elevs, src_used, n_ok = fetch_all_elevations(active_points, source=_src)
-    st.session_state["_elevations"]  = elevs
-    st.session_state["_elev_source"] = src_used
-    st.session_state["_elev_n_ok"]   = n_ok
-    st.session_state["_elev_status"] = "完了" if n_ok > 0 else "エラー"
-    _needs_rerun = True
+    if _has_wpts and not st.session_state.pop("_force_elev", False):
+        st.session_state["_elev_status"] = "スキップ"
+    else:
+        _src = st.session_state.get("_elev_src", "auto")
+        elevs, src_used, n_ok = fetch_all_elevations(active_points, source=_src)
+        st.session_state["_elevations"]  = elevs
+        st.session_state["_elev_source"] = src_used
+        st.session_state["_elev_n_ok"]   = n_ok
+        st.session_state["_elev_status"] = "完了" if n_ok > 0 else "エラー"
+        _needs_rerun = True
 
 if _needs_rerun:
     st.rerun()
+
+# ─── ターン初期化（初回のみ）──────────────────
+if "edit_turns" not in st.session_state:
+    if _has_wpts:
+        turns = []
+        for wpt in gpx_parsed.waypoints:
+            delta = None
+            desc  = wpt.description or ""
+            if desc.startswith("bearing_change:"):
+                try:
+                    delta = float(desc.split(":")[1])
+                except ValueError:
+                    pass
+            idx = nearest_trkpt_index(wpt.latitude, wpt.longitude, points)
+            turns.append({
+                "lat":   wpt.latitude,
+                "lon":   wpt.longitude,
+                "delta": delta,
+                "index": idx,
+                "name":  wpt.name or "ターンポイント",
+            })
+        st.session_state["edit_turns"] = turns
+    else:
+        _mta = st.session_state.get("_mta", 45)
+        _md  = st.session_state.get("_md",  100)
+        _sm  = st.session_state.get("_sm",  1)
+        raw_turns = detect_turns(active_points, min_turn_angle=_mta, min_dist=_md, smooth=_sm)
+        st.session_state["edit_turns"] = [with_name(t) for t in raw_turns]
+
+current_turns = st.session_state["edit_turns"]
+
+if _has_wpts:
+    st.info("📂 GPX内のターンポイントを読み込みました。マップマッチング・標高補正はスキップされています。")
 
 # ─── ルート情報 ───────────────────────────────
 dists_all = [haversine(active_points[i][0], active_points[i][1],
@@ -403,56 +441,36 @@ c2.metric("総距離", f"{total_dist_km:.1f} km")
 c3.metric("GPSポイント間隔（平均）", f"{avg_spacing:.0f} m")
 
 # ─────────────────────────────────────────────
-# サイドバー ─ パラメータ調整
+# サイドバー ─ ターン検出パラメータ
 # ─────────────────────────────────────────────
 
-st.sidebar.header("⚙️ パラメータ調整")
-
-if in_edit_mode:
-    st.sidebar.info("✏️ 手動編集モード中\nパラメータは固定されています")
-    if st.sidebar.button("🔄 自動検出に戻す（編集をリセット）"):
-        for k in ["edit_turns", "pending_wpt", "_handled_click", "_handled_tooltip",
-                  "_map_center", "_map_zoom"]:
-            st.session_state.pop(k, None)
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
-    min_turn_angle = st.session_state.get("_mta", 45)
-    min_dist_val   = st.session_state.get("_md",  100)
-    smooth_val     = st.session_state.get("_sm",  1)
-else:
-    st.sidebar.markdown("""
+st.sidebar.header("⚙️ ターン検出パラメータ")
+st.sidebar.markdown("""
 **アルゴリズム**: 角度法
 点 X の前後の点 A, B のベアリング差でコーナーを判定します。
 """)
-    min_turn_angle = st.sidebar.slider(
-        "ターン角閾値（度）", 20, 120, 45, 5,
-        help="進入・離脱方向の差がこの角度以上ならコーナーとみなす。\n"
-             "45°=やや曲がりも検出、60°=交差点のみ、90°=ほぼ直角以上のみ")
-    min_dist_val = st.sidebar.slider(
-        "ターン間最小距離（m）", 30, 500, 100, 10,
-        help="同一交差点での重複検出を防ぐ")
-    smooth_val = st.sidebar.slider(
-        "スムージング（前後N点参照）", 1, 5, 1, 1,
-        help="1=隣接点のみ（推奨）、2以上=ノイズに強いが精度低下の可能性あり")
-    st.session_state["_mta"] = min_turn_angle
-    st.session_state["_md"]  = min_dist_val
-    st.session_state["_sm"]  = smooth_val
 
-# ─── ターン検出（active_pointsを使用） ────────
-if not in_edit_mode:
-    raw_turns    = detect_turns(active_points, min_turn_angle=min_turn_angle,
-                                min_dist=min_dist_val, smooth=smooth_val)
-    current_turns = [with_name(t) for t in raw_turns]
-else:
-    current_turns = st.session_state["edit_turns"]
+min_turn_angle = st.sidebar.slider(
+    "ターン角閾値（度）", 20, 120, st.session_state.get("_mta", 45), 5,
+    help="進入・離脱方向の差がこの角度以上ならコーナーとみなす。\n"
+         "45°=やや曲がりも検出、60°=交差点のみ、90°=ほぼ直角以上のみ")
+min_dist_val = st.sidebar.slider(
+    "ターン間最小距離（m）", 30, 500, st.session_state.get("_md", 100), 10,
+    help="同一交差点での重複検出を防ぐ")
+smooth_val = st.sidebar.slider(
+    "スムージング（前後N点参照）", 1, 5, st.session_state.get("_sm", 1), 1,
+    help="1=隣接点のみ（推奨）、2以上=ノイズに強いが精度低下の可能性あり")
+st.session_state["_mta"] = min_turn_angle
+st.session_state["_md"]  = min_dist_val
+st.session_state["_sm"]  = smooth_val
 
-# ─── 手動編集モード開始 ──────────────────────
-if not in_edit_mode:
-    st.sidebar.divider()
-    if st.sidebar.button("✏️ 手動編集モードへ", type="primary"):
-        st.session_state["edit_turns"] = [with_name(dict(t)) for t in current_turns]
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
+if st.sidebar.button("🔄 自動検出を再実行（現在のターンポイントは破棄されます）", type="primary"):
+    raw_turns = detect_turns(active_points, min_turn_angle=min_turn_angle,
+                             min_dist=min_dist_val, smooth=smooth_val)
+    st.session_state["edit_turns"] = [with_name(t) for t in raw_turns]
+    st.session_state.pop("pending_wpt", None)
+    st.session_state["_skip_map_center_save"] = True
+    st.rerun()
 
 # ─────────────────────────────────────────────
 # サイドバー ─ マップマッチング（Valhalla）
@@ -479,6 +497,8 @@ if mm_status == "完了":
         st.sidebar.caption(f"⚠️ {st.session_state['_mm_error'][:120]}")
 elif mm_status == "エラー":
     st.sidebar.error(f"❌ マッチング失敗\n{st.session_state.get('_mm_error','')[:200]}")
+elif mm_status == "スキップ":
+    st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
 else:
     st.sidebar.info("⏳ 処理中…")
 
@@ -497,6 +517,8 @@ if mm_status is not None:
                   "_elevations", "_elev_status", "_elev_source", "_elev_n_ok",
                   "pending_wpt"]:   # edit_turns は意図的に除外（座標は再処理後に同期）
             st.session_state.pop(k, None)
+        st.session_state["_force_mm"]             = True
+        st.session_state["_force_elev"]           = True
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
@@ -524,6 +546,8 @@ if elev_status == "完了":
     st.sidebar.success(f"✅ {n_ok}/{len(active_points)} 点取得（{src}）")
 elif elev_status == "エラー":
     st.sidebar.warning("⚠️ 一部取得失敗")
+elif elev_status == "スキップ":
+    st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
 else:
     st.sidebar.info("⏳ 処理中…")
 
@@ -538,6 +562,7 @@ if elev_status is not None:
     if st.sidebar.button("🔄 再処理", key="elev_reset"):
         for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok"]:
             st.session_state.pop(k, None)
+        st.session_state["_force_elev"]           = True
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
@@ -545,9 +570,7 @@ if elev_status is not None:
 # 地図 + リストパネル
 # ─────────────────────────────────────────────
 
-if in_edit_mode:
-    st.info("✏️ **手動編集モード** — 地図をクリックして新しいウェイポイントを追加できます。"
-            "右パネルで削除・名前変更もできます。")
+st.info("✏️ 地図をクリックしてターンポイントを追加できます。右パネルで削除・名前（ナビゲーション内容）変更もできます。")
 
 col_map, col_list = st.columns([2, 1])
 pending = st.session_state.get("pending_wpt")
@@ -570,11 +593,8 @@ with col_map:
         delta = t.get("delta")
         popup_html = (f"<b>{arrow} {t['name']}</b>"
                       + (f"<br>ターン角: {delta:+.1f}°" if delta is not None else "")
-                      + f"<br>idx: {t['index']}")
-        if in_edit_mode:
-            tooltip_str = f"wpt:{t['index']}|{i+1}. {arrow} {t['name']}"
-        else:
-            tooltip_str = f"{i+1}. {arrow} {t['name']}"
+                      + f"<br>trkpt: {t['index']}")
+        tooltip_str = f"wpt:{i+1} / trkpt:{t['index']} {arrow} {t['name']}"
         folium.CircleMarker(
             location=[t["lat"], t["lon"]], radius=9,
             color=hex_color, fill=True, fill_color=hex_color, fill_opacity=0.9,
@@ -594,8 +614,7 @@ with col_map:
         key="gpx_map",
         center=_map_init_loc,
         zoom=_map_init_zoom,
-        returned_objects=(["last_clicked", "last_object_clicked_tooltip"]
-                          if in_edit_mode else []),
+        returned_objects=["last_clicked", "last_object_clicked_tooltip"],
     )
 
 # 地図の表示位置を記憶
@@ -606,12 +625,12 @@ if map_data and not _skip_map_center_save:
         st.session_state["_map_zoom"] = map_data["zoom"]
 
 # ─── マップクリック → pending_wpt 更新 ─────────
-if in_edit_mode and map_data:
+if map_data:
     tooltip_val = map_data.get("last_object_clicked_tooltip") or ""
 
     if tooltip_val.startswith("wpt:") and tooltip_val != st.session_state.get("_handled_tooltip"):
         st.session_state["_handled_tooltip"] = tooltip_val
-        trkpt_idx = int(tooltip_val.split("|")[0][4:])
+        trkpt_idx = int(tooltip_val.split(" / trkpt:")[1].split(" ")[0])
         if map_data.get("last_clicked"):
             click = map_data["last_clicked"]
             st.session_state["_handled_click"] = (round(click["lat"], 7), round(click["lng"], 7))
@@ -639,47 +658,36 @@ if in_edit_mode and map_data:
 
 # ─── 右パネル（リスト） ───────────────────────
 with col_list:
-    st.subheader(f"📋 ウェイポイント一覧　({len(current_turns)}件)")
+    st.subheader(f"📋 ターンポイント一覧　({len(current_turns)}件)")
 
-    if not current_turns and not (in_edit_mode and pending):
-        st.warning("ウェイポイントが検出されませんでした。\nターン角閾値を下げてみてください。")
+    if not current_turns and not pending:
+        st.warning("ターンポイントが検出されませんでした。\nターン角閾値を下げてみてください。")
 
     for i, t in enumerate(current_turns):
         arrow, hex_color = wpt_style(t)
         delta = t.get("delta")
-
-        if in_edit_mode:
-            badge = f"{delta:+.1f}°" if delta is not None else "手動"
-            st.markdown(
-                f'<div style="border-left:4px solid {hex_color};padding:3px 8px;'
-                f'background:#f8f9fa;border-radius:3px;margin-bottom:2px;">'
-                f'<b>{i+1}. {arrow}</b> <small style="color:#888">{badge} | idx:{t["index"]}</small></div>',
-                unsafe_allow_html=True,
+        badge = f"{delta:+.1f}°" if delta is not None else "手動"
+        st.markdown(
+            f'<div style="border-left:4px solid {hex_color};padding:3px 8px;'
+            f'background:#f8f9fa;border-radius:3px;margin-bottom:2px;">'
+            f'<b>{i+1}. {arrow}</b> <small style="color:#888">{badge} | trkpt:{t["index"]}</small></div>',
+            unsafe_allow_html=True,
+        )
+        col_n, col_d = st.columns([5, 1])
+        with col_n:
+            st.text_input(
+                "名前", value=t["name"],
+                key=f"wpt_name_{t['index']}",
+                label_visibility="collapsed",
             )
-            col_n, col_d = st.columns([5, 1])
-            with col_n:
-                st.text_input(
-                    "名前", value=t["name"],
-                    key=f"wpt_name_{t['index']}",
-                    label_visibility="collapsed",
-                )
-            with col_d:
-                if st.button("🗑", key=f"del_{t['index']}", help="削除"):
-                    st.session_state["edit_turns"].pop(i)
-                    st.session_state.pop("pending_wpt", None)
-                    st.rerun()
-        else:
-            name = t.get("name", "?")
-            st.markdown(
-                f'<div style="border-left:4px solid {hex_color};padding:6px 10px;'
-                f'margin-bottom:5px;border-radius:4px;background:#f8f9fa;">'
-                f'<b>{i+1}. {arrow} {name}</b><br>'
-                f'<small>{delta:+.1f}° &nbsp;|&nbsp; idx:{t["index"]}</small></div>',
-                unsafe_allow_html=True,
-            )
+        with col_d:
+            if st.button("🗑", key=f"del_{t['index']}", help="削除"):
+                st.session_state["edit_turns"].pop(i)
+                st.session_state.pop("pending_wpt", None)
+                st.rerun()
 
-    # ─── 保留ウェイポイント追加／削除UI ──────────
-    if in_edit_mode and pending:
+    # ─── 保留ターンポイント追加／削除UI ──────────
+    if pending:
         st.divider()
 
         existing_idx = next(
@@ -697,7 +705,7 @@ with col_list:
                 f'<small>trkpt #{pending["index"]}</small></div>',
                 unsafe_allow_html=True,
             )
-            st.warning("既存のウェイポイントを選択しています")
+            st.warning("既存のターンポイントを選択しています")
             col_a, col_c = st.columns(2)
             with col_a:
                 if st.button("🗑 削除", type="primary", key="pending_del"):
@@ -717,7 +725,7 @@ with col_list:
                 f"`{pending['lat']:.6f}, {pending['lon']:.6f}`"
             )
             new_name = st.text_input(
-                "ウェイポイント名", key="pending_name",
+                "ターンポイント名", key="pending_name",
                 placeholder="例: 右折、信号など",
             )
             col_a, col_c = st.columns(2)
@@ -759,8 +767,7 @@ with col_list:
                     st.session_state["_skip_map_center_save"] = True
                     st.rerun()
 
-    if in_edit_mode:
-        st.caption("💡 地図をクリックして新しいポイントを追加")
+    st.caption("💡 地図をクリックして新しいポイントを追加。ナビゲーションの内容は、「左折」「やや左」「直進」「やや右」「右折」を推奨しますが、フリーワードです。「左」、「右」の文字を入れておくと逆走時に正しく変換されます")
 
 # ─────────────────────────────────────────────
 # ダウンロード
@@ -769,7 +776,6 @@ with col_list:
 st.divider()
 st.subheader("💾 強化GPXの出力")
 
-# 適用済み処理をバッジ表示
 applied = []
 if st.session_state.get("_mm_status") == "完了":
     applied.append("🗺️ マップマッチング済み")
@@ -779,16 +785,15 @@ if applied:
     st.info("出力GPXに適用: " + " ／ ".join(applied))
 
 col_dl1, col_dl2, _ = st.columns([1, 1, 2])
-col_dl1.metric("ウェイポイント数", len(current_turns))
+col_dl1.metric("ターンポイント数", len(current_turns))
 
 with col_dl2:
     if st.button("📥 強化GPXを生成", type="primary", disabled=(len(current_turns) == 0)):
         turns_for_build = []
         for t in current_turns:
             tc = dict(t)
-            if in_edit_mode:
-                widget_key = f"wpt_name_{t['index']}"
-                tc["name"] = st.session_state.get(widget_key, t.get("name", "ウェイポイント"))
+            widget_key = f"wpt_name_{t['index']}"
+            tc["name"] = st.session_state.get(widget_key, t.get("name", "ターンポイント"))
             turns_for_build.append(tc)
 
         xml_output = build_enhanced_gpx(
@@ -804,4 +809,4 @@ with col_dl2:
             file_name=f"{base_name}_turns.gpx",
             mime="application/gpx+xml",
         )
-        st.success(f"✅ {len(turns_for_build)} 個のウェイポイントを埋め込みました")
+        st.success(f"✅ {len(turns_for_build)} 個のターンポイントを埋め込みました")
