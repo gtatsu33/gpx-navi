@@ -133,6 +133,9 @@ def fetch_intersection_names(turns, radius=20):
     if not turns:
         return {}
 
+    n = len(turns)
+    prog = st.progress(0, text=f"交差点名を取得中…（{n} 件）")
+
     # ^ $ で完全一致させ bus_stop などの部分一致を防ぐ
     _HW = '"^(traffic_signals|crossing|give_way|stop|mini_roundabout|motorway_junction)$"'
     union_parts = "".join(
@@ -159,12 +162,15 @@ def fetch_intersection_names(turns, radius=20):
             break
         except Exception:
             pass
+
     if elements is None:
+        prog.empty()
         return {}
 
     # 各ターンポイントに最近傍ノードの名前を対応付ける
+    prog.progress(0.8, text="交差点名を処理中…")
     result = {}
-    for t in turns:
+    for i, t in enumerate(turns):
         nearest_name = None
         nearest_dist = float("inf")
         for node in elements:
@@ -174,7 +180,9 @@ def fetch_intersection_names(turns, radius=20):
                 nearest_name = node.get("tags", {}).get("name")
         if nearest_name and nearest_dist <= radius:
             result[t["index"]] = nearest_name
+        prog.progress(0.8 + 0.2 * (i + 1) / n, text="交差点名を処理中…")
 
+    prog.empty()
     return result
 
 # ─────────────────────────────────────────────
@@ -494,8 +502,7 @@ if "edit_turns" not in st.session_state:
         _md  = st.session_state.get("_md",  100)
         _sm  = st.session_state.get("_sm",  1)
         raw_turns = detect_turns(active_points, min_turn_angle=_mta, min_dist=_md, smooth=_sm)
-        with st.spinner("交差点名を取得中…"):
-            intersection_names = fetch_intersection_names(raw_turns)
+        intersection_names = fetch_intersection_names(raw_turns)
         st.session_state["edit_turns"] = [
             with_name(t, intersection_names.get(t["index"]))
             for t in raw_turns
@@ -546,10 +553,9 @@ st.session_state["_iname_radius"] = _iname_radius
 if iname_status is not None:
     st.sidebar.caption("ターンポイント付近の交差点名をOSMから取得します")
     if st.sidebar.button("🔄 再取得", key="iname_reset"):
-        with st.spinner("🏷️ 交差点名を取得中…"):
-            _new_inames = fetch_intersection_names(
-                st.session_state["edit_turns"], radius=_iname_radius
-            )
+        _new_inames = fetch_intersection_names(
+            st.session_state["edit_turns"], radius=_iname_radius
+        )
         for t in st.session_state["edit_turns"]:
             if t["index"] in _new_inames:
                 new_name = with_name(t, _new_inames[t["index"]])["name"]
@@ -588,8 +594,7 @@ st.session_state["_sm"]  = smooth_val
 if st.sidebar.button("🔄 自動検出を再実行（現在のターンポイントは破棄されます）", type="primary"):
     raw_turns = detect_turns(active_points, min_turn_angle=min_turn_angle,
                              min_dist=min_dist_val, smooth=smooth_val)
-    with st.spinner("交差点名を取得中…"):
-        intersection_names = fetch_intersection_names(raw_turns)
+    intersection_names = fetch_intersection_names(raw_turns)
     st.session_state["edit_turns"] = [
         with_name(t, intersection_names.get(t["index"]))
         for t in raw_turns
@@ -812,8 +817,7 @@ if map_data:
                     "index": idx,
                 }
                 _iname_radius = st.session_state.get("_iname_radius", 20)
-                with st.spinner("交差点名を取得中…"):
-                    _inames = fetch_intersection_names([_temp], radius=_iname_radius)
+                _inames = fetch_intersection_names([_temp], radius=_iname_radius)
                 _iname = _inames.get(idx)
                 if wpt_delta is not None:
                     wpt_name = with_name(_temp, _iname)["name"]
