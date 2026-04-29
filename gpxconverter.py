@@ -3,6 +3,7 @@ GPX ターン検出・強化ツール
 点X の前後の点 A,B のベアリング差でコーナーを検出する
 手動編集機能付き（追加・削除・名前変更）
 マップマッチング（Valhalla）・標高補正（国土地理院 / Open-Meteo）対応
+交差点名取得（Overpass API / OSM直接）対応
 """
 
 import streamlit as st
@@ -13,6 +14,7 @@ import numpy as np
 import folium
 from streamlit_folium import st_folium
 import requests
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
@@ -90,12 +92,17 @@ def nearest_trkpt_index(lat, lon, points):
     return min(range(len(points)),
                key=lambda i: haversine(lat, lon, points[i][0], points[i][1]))
 
-def with_name(t):
-    """nameフィールドを持つターン辞書を返す（deltaから自動生成）"""
-    if "name" in t:
-        return t
+def with_name(t, intersection_name=None):
+    """nameフィールドを持つターン辞書を返す。
+    intersection_name がある場合は「△△交差点を右折」形式、
+    ない場合は従来通り「右折」形式。
+    """
     d = dict(t)
-    d["name"] = turn_label(t["delta"])[0]
+    dir_label = turn_label(t["delta"])[0]
+    if intersection_name:
+        d["name"] = f"{intersection_name}を{dir_label}"
+    else:
+        d["name"] = dir_label
     return d
 
 def wpt_style(t):
@@ -106,6 +113,69 @@ def wpt_style(t):
     else:
         arrow, color = "📍", "#27ae60"
     return arrow, color
+
+# ─────────────────────────────────────────────
+# 交差点名取得（Overpass API / OSM直接）
+# ─────────────────────────────────────────────
+
+_OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
+def fetch_intersection_names(turns, radius=20):
+    """
+    Overpass API でターンポイント付近のOSMノードから交差点名を取得する。
+    nameタグを持つノードを半径radius(m)以内で検索し、最近傍のものを採用する。
+    戻り値: {trkpt_index: intersection_name} の辞書。名前が取れなかった点はキーなし。
+    """
+    if not turns:
+        return {}
+
+    # ^ $ で完全一致させ bus_stop などの部分一致を防ぐ
+    _HW = '"^(traffic_signals|crossing|give_way|stop|mini_roundabout|motorway_junction)$"'
+    union_parts = "".join(
+        f'node(around:{radius},{t["lat"]},{t["lon"]})[name][highway~{_HW}];'
+        for t in turns
+    )
+    query = f"[out:json][timeout:25];({union_parts});out body;"
+
+    elements = None
+    for url in _OVERPASS_URLS:
+        try:
+            resp = requests.post(
+                url,
+                data="data=" + urllib.parse.quote(query),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "GPXTurnDetector/1.0",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            break
+        except Exception:
+            pass
+    if elements is None:
+        return {}
+
+    # 各ターンポイントに最近傍ノードの名前を対応付ける
+    result = {}
+    for t in turns:
+        nearest_name = None
+        nearest_dist = float("inf")
+        for node in elements:
+            d = haversine(t["lat"], t["lon"], node["lat"], node["lon"])
+            if d < nearest_dist:
+                nearest_dist = d
+                nearest_name = node.get("tags", {}).get("name")
+        if nearest_name and nearest_dist <= radius:
+            result[t["index"]] = nearest_name
+
+    return result
 
 # ─────────────────────────────────────────────
 # マップマッチング（Valhalla）
@@ -420,7 +490,13 @@ if "edit_turns" not in st.session_state:
         _md  = st.session_state.get("_md",  100)
         _sm  = st.session_state.get("_sm",  1)
         raw_turns = detect_turns(active_points, min_turn_angle=_mta, min_dist=_md, smooth=_sm)
-        st.session_state["edit_turns"] = [with_name(t) for t in raw_turns]
+        # locate API で交差点名を取得してwpt名に反映
+        with st.spinner("交差点名を取得中…"):
+            intersection_names = fetch_intersection_names(raw_turns)
+        st.session_state["edit_turns"] = [
+            with_name(t, intersection_names.get(t["index"]))
+            for t in raw_turns
+        ]
 
 current_turns = st.session_state["edit_turns"]
 
@@ -467,7 +543,12 @@ st.session_state["_sm"]  = smooth_val
 if st.sidebar.button("🔄 自動検出を再実行（現在のターンポイントは破棄されます）", type="primary"):
     raw_turns = detect_turns(active_points, min_turn_angle=min_turn_angle,
                              min_dist=min_dist_val, smooth=smooth_val)
-    st.session_state["edit_turns"] = [with_name(t) for t in raw_turns]
+    with st.spinner("交差点名を取得中…"):
+        intersection_names = fetch_intersection_names(raw_turns)
+    st.session_state["edit_turns"] = [
+        with_name(t, intersection_names.get(t["index"]))
+        for t in raw_turns
+    ]
     st.session_state.pop("pending_wpt", None)
     st.session_state["_skip_map_center_save"] = True
     st.rerun()
