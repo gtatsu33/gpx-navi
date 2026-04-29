@@ -774,11 +774,60 @@ if map_data:
         if click_key != st.session_state.get("_handled_click"):
             st.session_state["_handled_click"] = click_key
             idx = nearest_trkpt_index(click["lat"], click["lng"], active_points)
-            st.session_state["pending_wpt"] = {
-                "index": idx,
-                "lat":   active_points[idx][0],
-                "lon":   active_points[idx][1],
-            }
+            existing_idx = next(
+                (j for j, t in enumerate(current_turns) if t["index"] == idx),
+                None,
+            )
+            if existing_idx is not None:
+                st.session_state["pending_wpt"] = {
+                    "index": idx,
+                    "lat":   active_points[idx][0],
+                    "lon":   active_points[idx][1],
+                }
+            elif idx == 0 or idx == len(active_points) - 1:
+                st.session_state["pending_wpt"] = {
+                    "index": idx,
+                    "lat":   active_points[idx][0],
+                    "lon":   active_points[idx][1],
+                    "is_start_goal": True,
+                }
+            else:
+                sm = smooth_val
+                if sm <= idx < len(active_points) - sm:
+                    b_in  = calculate_bearing(
+                        active_points[idx - sm][0], active_points[idx - sm][1],
+                        active_points[idx][0],      active_points[idx][1],
+                    )
+                    b_out = calculate_bearing(
+                        active_points[idx][0],      active_points[idx][1],
+                        active_points[idx + sm][0], active_points[idx + sm][1],
+                    )
+                    wpt_delta = angle_diff(b_in, b_out)
+                else:
+                    wpt_delta = None
+                _temp = {
+                    "lat":   active_points[idx][0],
+                    "lon":   active_points[idx][1],
+                    "delta": wpt_delta,
+                    "index": idx,
+                }
+                _iname_radius = st.session_state.get("_iname_radius", 20)
+                with st.spinner("交差点名を取得中…"):
+                    _inames = fetch_intersection_names([_temp], radius=_iname_radius)
+                _iname = _inames.get(idx)
+                if wpt_delta is not None:
+                    wpt_name = with_name(_temp, _iname)["name"]
+                elif _iname:
+                    wpt_name = _iname
+                else:
+                    wpt_name = "追加したターンポイント"
+                turns_list = st.session_state["edit_turns"]
+                insert_at = next(
+                    (j for j, t in enumerate(turns_list) if t["index"] > idx),
+                    len(turns_list),
+                )
+                turns_list.insert(insert_at, {**_temp, "name": wpt_name})
+                st.session_state.pop("pending_wpt", None)
             st.session_state["_skip_map_center_save"] = True
             st.rerun()
 
@@ -824,7 +873,10 @@ with col_list:
             None,
         )
 
-        if existing_idx is not None:
+        if pending.get("is_start_goal"):
+            label = "スタート" if pending["index"] == 0 else "ゴール"
+            st.error(f"{label}地点は追加できません")
+        elif existing_idx is not None:
             existing = current_turns[existing_idx]
             ex_arrow, ex_color = wpt_style(existing)
             st.markdown(
@@ -835,66 +887,6 @@ with col_list:
                 unsafe_allow_html=True,
             )
             st.warning("既存のターンポイントを選択しています")
-            col_a, col_c = st.columns(2)
-            with col_a:
-                if st.button("🗑 削除", type="primary", key="pending_del"):
-                    st.session_state["edit_turns"].pop(existing_idx)
-                    st.session_state.pop("pending_wpt", None)
-                    st.session_state["_skip_map_center_save"] = True
-                    st.rerun()
-            with col_c:
-                if st.button("✖ キャンセル", key="pending_cancel_ex"):
-                    st.session_state.pop("pending_wpt", None)
-                    st.session_state["_skip_map_center_save"] = True
-                    st.rerun()
-        else:
-            st.markdown(
-                f"**📍 追加予定のポイント**  \n"
-                f"trkpt #{pending['index']}  \n"
-                f"`{pending['lat']:.6f}, {pending['lon']:.6f}`"
-            )
-            new_name = st.text_input(
-                "ターンポイント名", key="pending_name",
-                placeholder="例: 右折、信号など",
-            )
-            col_a, col_c = st.columns(2)
-            with col_a:
-                if st.button("➕ 追加", type="primary", disabled=not (new_name or "").strip()):
-                    idx = pending["index"]
-                    sm = smooth_val
-                    if sm <= idx < len(active_points) - sm:
-                        b_in  = calculate_bearing(
-                            active_points[idx - sm][0], active_points[idx - sm][1],
-                            active_points[idx][0],      active_points[idx][1],
-                        )
-                        b_out = calculate_bearing(
-                            active_points[idx][0],      active_points[idx][1],
-                            active_points[idx + sm][0], active_points[idx + sm][1],
-                        )
-                        wpt_delta = angle_diff(b_in, b_out)
-                    else:
-                        wpt_delta = None
-                    new_wpt = {
-                        "lat":   pending["lat"],
-                        "lon":   pending["lon"],
-                        "delta": wpt_delta,
-                        "index": idx,
-                        "name":  new_name.strip(),
-                    }
-                    turns_list = st.session_state["edit_turns"]
-                    insert_at = next(
-                        (j for j, t in enumerate(turns_list) if t["index"] > pending["index"]),
-                        len(turns_list),
-                    )
-                    turns_list.insert(insert_at, new_wpt)
-                    st.session_state.pop("pending_wpt", None)
-                    st.session_state["_skip_map_center_save"] = True
-                    st.rerun()
-            with col_c:
-                if st.button("✖ キャンセル", key="pending_cancel_new"):
-                    st.session_state.pop("pending_wpt", None)
-                    st.session_state["_skip_map_center_save"] = True
-                    st.rerun()
 
     st.caption("💡 地図をクリックして新しいポイントを追加。ナビゲーションの内容は、「左折」「やや左」「直進」「やや右」「右折」を推奨しますが、フリーワードです。「左」、「右」の文字を入れておくと逆走時に正しく変換されます")
 
