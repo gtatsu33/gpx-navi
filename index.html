@@ -657,7 +657,10 @@ async function startNavigation(routeId, isReverse = false) {
       ...currentRoute,
       track: currentRoute.track.slice().reverse(),
       turns: currentRoute.turns.slice().reverse().map(t => ({
-        ...t, trkIdx: n - 1 - t.trkIdx, name: reverseTurnName(t.name)
+        ...t,
+        trkIdx: n - 1 - t.trkIdx,
+        name: reverseTurnName(t.name),
+        bearingChange: isNaN(t.bearingChange) ? t.bearingChange : -t.bearingChange
       }))
     };
   }
