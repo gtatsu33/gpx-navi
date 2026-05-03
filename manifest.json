@@ -1,6 +1,6 @@
 {
-  "name": "GPX ナビ",
-  "short_name": "GPXナビ",
+  "name": "gpx-navi",
+  "short_name": "gpx-navi",
   "description": "サイクリング・ランニング用GPXナビゲーションアプリ",
   "start_url": "./index.html",
   "display": "standalone",
