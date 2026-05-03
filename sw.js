@@ -1,13 +1,16 @@
 // GPX ナビ Service Worker
 // アプリシェルとマップタイルをキャッシュしてオフライン動作を実現する
 
-const SHELL_CACHE = 'gpxnav-shell-v2';
+const SHELL_CACHE = 'gpxnav-shell-v3';
 const TILE_CACHE  = 'gpxnav-tiles-v1';
 
 const SHELL_ASSETS = [
   './',
   './index.html',
   './manifest.json',
+  './gpx-navi_180x180.png',
+  './gpx-navi_192x192.png',
+  './gpx-navi_512x512.png',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
   'https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700;900&family=Noto+Sans+JP:wght@400;700&display=swap',

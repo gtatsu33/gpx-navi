@@ -10,13 +10,13 @@
   "lang": "ja",
   "icons": [
     {
-      "src": "icon-192.png",
+      "src": "gpx-navi_192x192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "icon-512.png",
+      "src": "gpx-navi_512x512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
