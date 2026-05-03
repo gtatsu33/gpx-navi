@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="theme-color" content="#0d0d1a">
   <title>GPX ナビ</title>
   <link rel="manifest" href="manifest.json">
@@ -117,6 +117,7 @@
 
     #toast { position: fixed; bottom: calc(20px + var(--sab)); left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); color: #fff; padding: 10px 20px; border-radius: 20px; font-size: 14px; z-index: 9999; display: none; max-width: 85vw; text-align: center; }
 
+    .leaflet-top { top: var(--sat) !important; }
     .leaflet-control-zoom { border: none !important; }
     .leaflet-control-zoom a { background: rgba(13,13,26,0.85) !important; color: #fff !important; border: 1px solid var(--border) !important; }
     .leaflet-control-attribution { font-size: 10px !important; background: rgba(0,0,0,0.5) !important; color: #777 !important; }
