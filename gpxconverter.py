@@ -217,42 +217,6 @@ def _valhalla_match_chunk(chunk, costing, search_radius):
     resp.raise_for_status()
     return resp.json()
 
-def map_match_points(points, profile="cycling", radius=50):
-    """
-    全trkptをValhalla trace_attributes でスナップする。
-    戻り値: (matched_points, n_snapped, error_msg)
-      - matched_points: 元と同じ長さのリスト。スナップできなかった点は元の座標のまま。
-    """
-    CHUNK     = 50
-    matched   = list(points)
-    n_snapped = 0
-    errors    = []
-    n_chunks  = math.ceil(len(points) / CHUNK)
-    costing   = _VALHALLA_COSTING.get(profile, "bicycle")
-
-    prog = st.progress(0, text="マップマッチング中…")
-    for ci in range(n_chunks):
-        s     = ci * CHUNK
-        e     = min(s + CHUNK, len(points))
-        chunk = points[s:e]
-        try:
-            data = _valhalla_match_chunk(chunk, costing, radius)
-        except Exception as ex:
-            errors.append(f"chunk {ci}: {ex}")
-            prog.progress((ci + 1) / n_chunks,
-                          text=f"マッチング中… {ci+1}/{n_chunks} チャンク (エラー)")
-            continue
-
-        for j, mp in enumerate(data.get("matched_points", [])):
-            if mp.get("type") in ("matched", "interpolated") and s + j < len(matched):
-                matched[s + j] = (mp["lat"], mp["lon"])
-                n_snapped += 1
-
-        prog.progress((ci + 1) / n_chunks,
-                      text=f"マッチング中… {ci+1}/{n_chunks} チャンク")
-
-    prog.empty()
-    return matched, n_snapped, ("; ".join(errors) if errors else None)
 
 # ─────────────────────────────────────────────
 # 標高補正（国土地理院 / Open-Meteo）
@@ -352,6 +316,224 @@ def fetch_all_elevations(points, source="auto"):
     n_ok = sum(1 for e in elevations if e is not None)
     return elevations, src_label, n_ok
 
+def _cumulative_distances(points):
+    cum = [0.0]
+    for i in range(1, len(points)):
+        cum.append(cum[-1] + haversine(
+            points[i - 1][0], points[i - 1][1],
+            points[i][0], points[i][1],
+        ))
+    return cum
+
+def _elevation_grades(points, elevations, cum_dists=None):
+    if cum_dists is None:
+        cum_dists = _cumulative_distances(points)
+
+    grades = []
+    for i in range(len(points) - 1):
+        if elevations[i] is None or elevations[i + 1] is None:
+            grades.append(None)
+            continue
+        dist = cum_dists[i + 1] - cum_dists[i]
+        if dist <= 0:
+            grades.append(None)
+            continue
+        grades.append((elevations[i + 1] - elevations[i]) / dist * 100)
+    return grades
+
+def _local_median_elevation(i, cum_dists, elevations, window_m):
+    lo = cum_dists[i] - window_m
+    hi = cum_dists[i] + window_m
+    vals = [
+        e for j, e in enumerate(elevations)
+        if e is not None and lo <= cum_dists[j] <= hi
+    ]
+    return float(np.median(vals)) if vals else None
+
+def _cluster_segments(seg_indexes, cum_dists, cluster_gap_m):
+    if not seg_indexes:
+        return []
+
+    clusters = []
+    cur = {"start_seg": seg_indexes[0], "end_seg": seg_indexes[0]}
+    for seg_idx in seg_indexes[1:]:
+        gap_m = cum_dists[seg_idx] - cum_dists[cur["end_seg"] + 1]
+        if gap_m <= cluster_gap_m:
+            cur["end_seg"] = seg_idx
+        else:
+            clusters.append(cur)
+            cur = {"start_seg": seg_idx, "end_seg": seg_idx}
+    clusters.append(cur)
+    return clusters
+
+def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster_gap_m=250.0):
+    """
+    標高API由来の局所スパイクを前後アンカーの線形補間で除去する。
+    戻り値: (cleaned_elevations, stats)
+    """
+    n = len(points)
+    if n < 4 or not elevations or len(elevations) != n:
+        return elevations, {"clusters": 0, "points": 0, "max_grade_before": 0.0, "max_grade_after": 0.0}
+
+    BAD_GRADE_THRESHOLD = bad_grade_threshold
+    HARD_SPIKE_THRESHOLD = 35.0
+    NEAR_BAD_THRESHOLD = 15.0
+    MIN_ELEVATION_JUMP_M = 6.0
+    NEAR_ELEVATION_JUMP_M = 3.0
+    CLUSTER_GAP_M = cluster_gap_m
+    MERGE_GAP_M = 50.0
+    MAX_ANCHOR_SEARCH_M = 600.0
+    ANCHOR_GRADE_LIMIT = 12.0
+    BOUNDARY_GRADE_LIMIT = 13.0
+    MEDIAN_WINDOW_M = 150.0
+    ANCHOR_MEDIAN_DEV_M = 5.0
+    MAX_ANCHOR_GRADE = 15.0
+
+    cleaned = list(elevations)
+    cum_dists = _cumulative_distances(points)
+    grades = _elevation_grades(points, cleaned, cum_dists)
+    max_grade_before = max((abs(g) for g in grades if g is not None), default=0.0)
+
+    bad_segments = []
+    for i, grade in enumerate(grades):
+        if grade is None or cleaned[i] is None or cleaned[i + 1] is None:
+            continue
+        dz = cleaned[i + 1] - cleaned[i]
+        if (
+            abs(grade) >= BAD_GRADE_THRESHOLD and abs(dz) >= MIN_ELEVATION_JUMP_M
+        ) or (
+            abs(grade) >= HARD_SPIKE_THRESHOLD and abs(dz) >= NEAR_ELEVATION_JUMP_M
+        ):
+            bad_segments.append(i)
+
+    if not bad_segments:
+        return cleaned, {"clusters": 0, "points": 0, "max_grade_before": max_grade_before, "max_grade_after": max_grade_before}
+
+    near_segments = set(bad_segments)
+    for bad_idx in bad_segments:
+        center = (cum_dists[bad_idx] + cum_dists[bad_idx + 1]) / 2
+        for i, grade in enumerate(grades):
+            if grade is None or cleaned[i] is None or cleaned[i + 1] is None:
+                continue
+            seg_center = (cum_dists[i] + cum_dists[i + 1]) / 2
+            dz = cleaned[i + 1] - cleaned[i]
+            if (
+                abs(seg_center - center) <= CLUSTER_GAP_M
+                and abs(grade) >= NEAR_BAD_THRESHOLD
+                and abs(dz) >= NEAR_ELEVATION_JUMP_M
+            ):
+                near_segments.add(i)
+
+    clusters = _cluster_segments(sorted(near_segments), cum_dists, CLUSTER_GAP_M)
+
+    def is_anchor_candidate(i):
+        if i <= 0 or i >= n - 1 or cleaned[i] is None:
+            return False
+        prev_g = grades[i - 1]
+        next_g = grades[i]
+        if prev_g is None or next_g is None:
+            return False
+        if abs(prev_g) > ANCHOR_GRADE_LIMIT or abs(next_g) > ANCHOR_GRADE_LIMIT:
+            return False
+        local_med = _local_median_elevation(i, cum_dists, cleaned, MEDIAN_WINDOW_M)
+        return local_med is not None and abs(cleaned[i] - local_med) <= ANCHOR_MEDIAN_DEV_M
+
+    def find_anchor(start_i, direction):
+        start_dist = cum_dists[start_i]
+        i = start_i
+        stable_run = []
+        while 0 < i < n - 1 and abs(cum_dists[i] - start_dist) <= MAX_ANCHOR_SEARCH_M:
+            if is_anchor_candidate(i):
+                stable_run.append(i)
+                if len(stable_run) >= 2:
+                    return stable_run[0]
+            else:
+                stable_run = []
+            i += direction
+        return None
+
+    def is_left_boundary_anchor(i):
+        return (
+            0 < i < n - 1
+            and cleaned[i] is not None
+            and grades[i - 1] is not None
+            and abs(grades[i - 1]) <= BOUNDARY_GRADE_LIMIT
+        )
+
+    def is_right_boundary_anchor(i):
+        return (
+            0 < i < n - 1
+            and cleaned[i] is not None
+            and grades[i] is not None
+            and abs(grades[i]) <= BOUNDARY_GRADE_LIMIT
+        )
+
+    repair_ranges = []
+    for cluster in clusters:
+        start_pt = cluster["start_seg"]
+        end_pt = cluster["end_seg"] + 1
+        left_anchor = start_pt if is_left_boundary_anchor(start_pt) else find_anchor(start_pt - 1, -1)
+        right_anchor = end_pt if is_right_boundary_anchor(end_pt) else find_anchor(end_pt + 1, 1)
+        if left_anchor is None or right_anchor is None or left_anchor >= right_anchor:
+            continue
+        dist_m = cum_dists[right_anchor] - cum_dists[left_anchor]
+        if dist_m <= 0 or cleaned[left_anchor] is None or cleaned[right_anchor] is None:
+            continue
+        net_grade = (cleaned[right_anchor] - cleaned[left_anchor]) / dist_m * 100
+        if abs(net_grade) > MAX_ANCHOR_GRADE:
+            continue
+        repair_ranges.append({
+            "left": left_anchor,
+            "right": right_anchor,
+            "bad_start": start_pt,
+            "bad_end": end_pt,
+        })
+
+    if not repair_ranges:
+        return cleaned, {"clusters": 0, "points": 0, "max_grade_before": max_grade_before, "max_grade_after": max_grade_before}
+
+    repair_ranges.sort(key=lambda r: r["left"])
+    merged = [repair_ranges[0]]
+    for r in repair_ranges[1:]:
+        prev = merged[-1]
+        gap_m = cum_dists[r["left"]] - cum_dists[prev["right"]]
+        if r["left"] <= prev["right"] or gap_m <= MERGE_GAP_M:
+            prev["right"] = max(prev["right"], r["right"])
+            prev["bad_start"] = min(prev["bad_start"], r["bad_start"])
+            prev["bad_end"] = max(prev["bad_end"], r["bad_end"])
+        else:
+            merged.append(r)
+
+    corrected_points = set()
+    for r in merged:
+        left = r["left"]
+        right = r["right"]
+        if right - left < 2:
+            continue
+        dist_m = cum_dists[right] - cum_dists[left]
+        if dist_m <= 0 or cleaned[left] is None or cleaned[right] is None:
+            continue
+        net_grade = (cleaned[right] - cleaned[left]) / dist_m * 100
+        if abs(net_grade) > MAX_ANCHOR_GRADE:
+            continue
+        for i in range(left + 1, right):
+            if cleaned[i] is None:
+                continue
+            ratio = (cum_dists[i] - cum_dists[left]) / dist_m
+            new_ele = cleaned[left] + (cleaned[right] - cleaned[left]) * ratio
+            if abs(cleaned[i] - new_ele) >= 0.5:
+                cleaned[i] = round(new_ele, 1)
+                corrected_points.add(i)
+
+    grades_after = _elevation_grades(points, cleaned, cum_dists)
+    max_grade_after = max((abs(g) for g in grades_after if g is not None), default=0.0)
+    return cleaned, {
+        "clusters": len(merged),
+        "points": len(corrected_points),
+        "max_grade_before": max_grade_before,
+        "max_grade_after": max_grade_after,
+    }
+
 # ─────────────────────────────────────────────
 # GPX ビルダー（マッチング・標高補正対応）
 # ─────────────────────────────────────────────
@@ -417,7 +599,8 @@ _STATE_KEYS = [
     "edit_turns", "pending_wpt", "_handled_click", "_handled_tooltip",
     "_map_center", "_map_zoom",
     "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
-    "_elevations",    "_elev_status", "_elev_source", "_elev_n_ok",
+    "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
+    "_elevations",    "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
     "_iname_status",  "_iname_n_found",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
@@ -435,19 +618,90 @@ _mm_ran      = False
 
 if st.session_state.get("_mm_status") is None:
     if _has_wpts and not st.session_state.pop("_force_mm", False):
-        st.session_state["_matched_points"] = list(points)
-        st.session_state["_mm_status"]      = "スキップ"
+        st.session_state["_matched_points"]         = list(points)
+        st.session_state["_mm_status"]              = "スキップ"
     else:
-        _profile = st.session_state.get("_mm_profile", "cycling")
-        _radius  = st.session_state.get("_mm_radius",  50)
-        with st.spinner("🗺️ マップマッチング処理中…"):
-            matched, n_snapped, err = map_match_points(points, profile=_profile, radius=_radius)
-        st.session_state["_matched_points"] = matched
-        st.session_state["_mm_n_snapped"]   = n_snapped
-        st.session_state["_mm_error"]       = err
-        st.session_state["_mm_status"]      = "完了" if n_snapped > 0 else "エラー"
+        st.session_state["_mm_status"]              = "running"
+        st.session_state["_mm_chunk_idx"]           = 0
+        st.session_state["_mm_matched_partial"]     = list(points)
+        st.session_state["_mm_n_snapped_partial"]   = 0
+        st.session_state["_mm_errors_partial"]      = []
+
+if st.session_state.get("_mm_status") == "running":
+    _MM_CHUNK   = 50
+    _profile    = st.session_state.get("_mm_profile", "cycling")
+    _radius     = st.session_state.get("_mm_radius", 50)
+    _costing    = _VALHALLA_COSTING.get(_profile, "bicycle")
+    _ci         = st.session_state["_mm_chunk_idx"]
+    _n_chunks   = math.ceil(len(points) / _MM_CHUNK)
+    _cancelled  = st.session_state.pop("_mm_cancel_requested", False)
+
+    _col_prog, _col_btn = st.columns([5, 1])
+    with _col_prog:
+        _prog_area = st.empty()
+        if _cancelled:
+            _prog_area.progress(_ci / _n_chunks, text="⏱️ キャンセル待ち中…")
+        else:
+            _prog_area.progress(_ci / _n_chunks,
+                                text=f"🗺️ マップマッチング中… {_ci + 1}/{_n_chunks} チャンク")
+    with _col_btn:
+        if st.button("⏹ キャンセル", key="mm_cancel_btn"):
+            st.session_state["_mm_cancel_requested"] = True
+            st.rerun()
+
+    if _cancelled:
+        _errs = st.session_state.get("_mm_errors_partial", [])
+        st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(points))
+        st.session_state["_mm_n_snapped"]   = st.session_state.get("_mm_n_snapped_partial", 0)
+        st.session_state["_mm_error"]       = "キャンセルされました" + ("; " + "; ".join(_errs) if _errs else "")
+        st.session_state["_mm_status"]      = "キャンセル"
+        for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
+            st.session_state.pop(_k, None)
+        _prog_area.progress(1.0, text="✅ キャンセルしました")
         _needs_rerun = True
-        _mm_ran      = True
+    else:
+        _s = _ci * _MM_CHUNK
+        _e = min(_s + _MM_CHUNK, len(points))
+        _auto_cancel = False
+
+        try:
+            _data = _valhalla_match_chunk(points[_s:_e], _costing, _radius)
+            _mp_list = st.session_state["_mm_matched_partial"]
+            for _j, _mp in enumerate(_data.get("matched_points", [])):
+                if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
+                    _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
+                    st.session_state["_mm_n_snapped_partial"] += 1
+        except requests.exceptions.Timeout:
+            if _ci == 0:
+                _auto_cancel = True
+            else:
+                st.session_state["_mm_errors_partial"].append(f"chunk {_ci}: timeout")
+        except Exception as _ex:
+            st.session_state["_mm_errors_partial"].append(f"chunk {_ci}: {_ex}")
+
+        if _auto_cancel:
+            st.session_state["_matched_points"] = list(points)
+            st.session_state["_mm_n_snapped"]   = 0
+            st.session_state["_mm_error"]       = "1チャンク目タイムアウトにより自動キャンセル"
+            st.session_state["_mm_status"]      = "キャンセル"
+            for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
+                st.session_state.pop(_k, None)
+            _prog_area.progress(1.0, text="✅ タイムアウトによりキャンセルしました")
+            _needs_rerun = True
+        elif _ci + 1 >= _n_chunks:
+            _errs  = st.session_state.get("_mm_errors_partial", [])
+            _n_sn  = st.session_state.get("_mm_n_snapped_partial", 0)
+            st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(points))
+            st.session_state["_mm_n_snapped"]   = _n_sn
+            st.session_state["_mm_error"]       = "; ".join(_errs) if _errs else None
+            st.session_state["_mm_status"]      = "完了" if _n_sn > 0 else "エラー"
+            for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
+                st.session_state.pop(_k, None)
+            _mm_ran      = True
+            _needs_rerun = True
+        else:
+            st.session_state["_mm_chunk_idx"] = _ci + 1
+            st.rerun()
 
 active_points = st.session_state.get("_matched_points", points)
 
@@ -466,9 +720,15 @@ if st.session_state.get("_elev_status") is None:
         _src = st.session_state.get("_elev_src", "auto")
         with st.spinner("⛰️ 標高補正処理中…"):
             elevs, src_used, n_ok = fetch_all_elevations(active_points, source=_src)
+            elevs, clean_stats = clean_elevation_spikes(
+                active_points, elevs,
+                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
+                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
+            )
         st.session_state["_elevations"]  = elevs
         st.session_state["_elev_source"] = src_used
         st.session_state["_elev_n_ok"]   = n_ok
+        st.session_state["_elev_clean_stats"] = clean_stats
         st.session_state["_elev_status"] = "完了" if n_ok > 0 else "エラー"
         _needs_rerun = True
 
@@ -632,6 +892,11 @@ elif mm_status == "エラー":
     st.sidebar.error(f"❌ マッチング失敗\n{st.session_state.get('_mm_error','')[:200]}")
 elif mm_status == "スキップ":
     st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
+elif mm_status == "キャンセル":
+    n_snapped = st.session_state.get("_mm_n_snapped", 0)
+    st.sidebar.warning(f"⚠️ キャンセル済み（{n_snapped} 点スナップ）")
+    if st.session_state.get("_mm_error"):
+        st.sidebar.caption(st.session_state["_mm_error"][:120])
 else:
     st.sidebar.info("⏳ 処理中…")
 
@@ -647,7 +912,8 @@ if mm_status is not None:
     st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
     if st.sidebar.button("🔄 再処理", key="mm_reset"):
         for k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
-                  "pending_wpt"]:   # edit_turns は意図的に除外（座標は再処理後に同期）
+                  "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
+                  "_mm_cancel_requested", "pending_wpt"]:
             st.session_state.pop(k, None)
         st.session_state["_force_mm"]             = True
         st.session_state["_skip_map_center_save"] = True
@@ -675,6 +941,16 @@ if elev_status == "完了":
     n_ok = st.session_state.get("_elev_n_ok", 0)
     src  = st.session_state.get("_elev_source", "")
     st.sidebar.success(f"✅ {n_ok}/{len(active_points)} 点取得（{src}）")
+    clean_stats = st.session_state.get("_elev_clean_stats", {})
+    clean_points = clean_stats.get("points", 0)
+    if clean_points:
+        st.sidebar.caption(
+            f"スパイク除去: {clean_stats.get('clusters', 0)} 箇所 / {clean_points} 点補正 "
+            f"（最大勾配 {clean_stats.get('max_grade_before', 0):.1f}% → "
+            f"{clean_stats.get('max_grade_after', 0):.1f}%）"
+        )
+    else:
+        st.sidebar.caption("スパイク除去: 補正対象なし")
 elif elev_status == "エラー":
     st.sidebar.warning("⚠️ 一部取得失敗")
 elif elev_status == "スキップ":
@@ -688,10 +964,20 @@ st.sidebar.caption(f"ルート判定: {'🇯🇵 日本' if in_japan_hint else '
 _sel_src = st.sidebar.selectbox("データソース", _elev_labels, index=_cur_src_idx)
 st.session_state["_elev_src"] = _ELEV_SOURCES[_sel_src]
 
+_elev_bad_grade = st.sidebar.slider(
+    "スパイク判定 勾配閾値（%）", 5, 25, int(st.session_state.get("_elev_bad_grade", 15)), 1,
+    help="この勾配以上 かつ 高度変化6m以上のセグメントをスパイク候補とみなす")
+st.session_state["_elev_bad_grade"] = float(_elev_bad_grade)
+
+_elev_cluster_gap = st.sidebar.slider(
+    "スパイク判定 クラスターギャップ（m）", 50, 500, int(st.session_state.get("_elev_cluster_gap", 250)), 50,
+    help="スパイク候補同士をまとめる最大距離。大きくすると広範囲のスパイクをまとめて修正")
+st.session_state["_elev_cluster_gap"] = float(_elev_cluster_gap)
+
 if elev_status is not None:
     st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
     if st.sidebar.button("🔄 再処理", key="elev_reset"):
-        for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok"]:
+        for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats"]:
             st.session_state.pop(k, None)
         st.session_state["_force_elev"]           = True
         st.session_state["_skip_map_center_save"] = True
