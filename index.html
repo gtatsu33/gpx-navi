@@ -129,11 +129,21 @@
       display: none;
     }
     #grade-canvas {
-      position: absolute; bottom: 220px; left: 8px; right: 8px;
+      position: absolute; bottom: 220px; left: 8px; right: 130px;
       height: 90px; border-radius: 8px; z-index: 950;
       background: rgba(0,0,0,0.82);
       display: none;
     }
+    #nav-info-box {
+      position: absolute; bottom: 220px; right: 8px;
+      width: 114px; height: 90px; border-radius: 8px; z-index: 950;
+      background: rgba(0,0,0,0.82);
+      display: none;
+      flex-direction: column; justify-content: space-evenly; align-items: center;
+    }
+    .info-row { text-align: center; line-height: 1.1; }
+    .info-lbl { font-size: 9px; color: #888; font-family: var(--font-jp); }
+    .info-val { font-family: var(--font-num); font-size: 21px; font-weight: 700; color: var(--text); }
     #btn-grade.grade-on { background: #1a3a2a; color: var(--go); border: 1px solid var(--go); }
   </style>
 </head>
@@ -156,6 +166,10 @@
   <div id="map"></div>
   <button id="btn-recenter" onclick="recenter()"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg></button>
   <canvas id="grade-canvas" height="90"></canvas>
+  <div id="nav-info-box">
+    <div class="info-row"><div class="info-lbl">残り距離数</div><div class="info-val" id="info-remain">—</div></div>
+    <div class="info-row"><div class="info-lbl">経過時間</div><div class="info-val" id="info-elapsed">—</div></div>
+  </div>
   <div id="debug-log"></div>
   <div id="nav-panel">
     <div id="turn-primary">
@@ -206,6 +220,8 @@ const SHOW_DEBUG = false;
 let trackGrads    = [];  // { cumDist, ele, grade } per trkpt
 let currentTrkIdx = 0;   // 現在地に最近接のtrkptインデックス
 let gradeEnabled  = false; // 勾配表示ON/OFF（起動時はOFF）
+let trackCumDists = [];  // trkpt ごとの累積距離 [m]
+let navStartTime  = null; // GPS初回取得時刻 (ms)
 
 // ── IndexedDB ─────────────────────────────────────────
 let db;
@@ -620,6 +636,27 @@ function renderGradeCanvas() {
   }
 }
 
+function updateInfoOverlay() {
+  const remEl = document.getElementById('info-remain');
+  const elEl  = document.getElementById('info-elapsed');
+  if (!remEl || !elEl) return;
+
+  if (trackCumDists.length > 1) {
+    const remain = Math.max(0,
+      trackCumDists[trackCumDists.length - 1] - (trackCumDists[currentTrkIdx] ?? 0));
+    remEl.textContent = remain >= 1000
+      ? `${(remain / 1000).toFixed(1)}km`
+      : `${Math.round(remain)}m`;
+  }
+
+  if (navStartTime) {
+    const sec = Math.floor((Date.now() - navStartTime) / 1000);
+    const h   = Math.floor(sec / 3600);
+    const m   = Math.floor((sec % 3600) / 60);
+    elEl.textContent = `${h}:${String(m).padStart(2, '0')}`;
+  }
+}
+
 // 通過判定ステート（targetIdx が進むたびにリセット）
 let nearTarget    = false;
 let minDistTarget = Infinity;
@@ -674,6 +711,12 @@ async function startNavigation(routeId, isReverse = false) {
   followMode = true;
   currentTrkIdx = 0;
   trackGrads = buildTrackGrads(currentRoute.track);
+  trackCumDists = [0];
+  for (let i = 1; i < currentRoute.track.length; i++)
+    trackCumDists.push(trackCumDists[i-1] + geoDist(
+      currentRoute.track[i-1].lat, currentRoute.track[i-1].lon,
+      currentRoute.track[i].lat,   currentRoute.track[i].lon));
+  navStartTime = null;
   gradeEnabled = false;
   voiceEnabled = true;
   document.getElementById('btn-voice').textContent = '🔊 音声';
@@ -704,6 +747,10 @@ function initMap() {
   document.getElementById('debug-log').style.display = SHOW_DEBUG ? 'block' : 'none';
   // 勾配キャンバスは gradeEnabled に従う（起動時は非表示）
   document.getElementById('grade-canvas').style.display = 'none';
+  const _infoBox = document.getElementById('nav-info-box');
+  if (_infoBox) { _infoBox.style.display = 'flex'; }
+  document.getElementById('info-remain').textContent  = '—';
+  document.getElementById('info-elapsed').textContent = '—';
   const btnGrade = document.getElementById('btn-grade');
   if (btnGrade) { btnGrade.classList.remove('grade-on'); }
   const track = currentRoute.track;
@@ -861,10 +908,10 @@ function onGPSUpdate(pos) {
   if (!map.hasLayer(posMarker)) posMarker.addTo(map);
   if (followMode) map.setView([lat, lon], map.getZoom());
   document.getElementById('nav-status').textContent = `±${Math.round(pos.coords.accuracy)}m`;
-  if (gradeEnabled && !SHOW_DEBUG) {
-    updateCurrentTrkIdx(lat, lon);
-    renderGradeCanvas();
-  }
+  if (!navStartTime) navStartTime = Date.now();
+  updateCurrentTrkIdx(lat, lon);
+  if (gradeEnabled && !SHOW_DEBUG) renderGradeCanvas();
+  updateInfoOverlay();
   updateNavPanel(lat, lon);
 }
 
@@ -1126,7 +1173,9 @@ function showScreen(name) {
 function goBackToList() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if ('speechSynthesis' in window) speechSynthesis.cancel();
-  releaseWakeLock();  // ナビ終了時にスリープ防止解除
+  releaseWakeLock();
+  const _ib = document.getElementById('nav-info-box');
+  if (_ib) _ib.style.display = 'none';
   showScreen('list'); renderRouteList();
 }
 
