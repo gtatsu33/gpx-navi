@@ -436,6 +436,7 @@ const getTurnStyle = name => TURN_STYLE[name] || TURN_STYLE['直進維持'];
 // trackIdx / nearestIdx / cumDist は一切使わない。
 let map = null, posMarker = null, targetMarker = null, currentRoute = null, watchId = null;
 let currentHeading = null;
+let currentPos = null;
 
 // waypoints[] : wpt をGPX順（=ルート順）に並べたもの + ゴールセンチネル
 // 各要素: { lat, lon, name, isGoal }
@@ -649,12 +650,18 @@ function updateInfoOverlay() {
   const elEl  = document.getElementById('info-elapsed');
   if (!remEl || !elEl) return;
 
-  if (trackCumDists.length > 1) {
-    const remain = Math.max(0,
-      trackCumDists[trackCumDists.length - 1] - (trackCumDists[currentTrkIdx] ?? 0));
+  if (trackCumDists.length > 1 && currentPos && targetIdx < waypoints.length) {
+    const wp = waypoints[targetIdx];
+    const distToWp = geoDist(currentPos.lat, currentPos.lon, wp.lat, wp.lon);
+    const routeFromWp = wp.isGoal
+      ? 0
+      : Math.max(0, trackCumDists[trackCumDists.length - 1] - (trackCumDists[wp.trkIdx] ?? 0));
+    const remain = Math.max(0, distToWp + routeFromWp);
     remEl.textContent = remain >= 1000
       ? `${(remain / 1000).toFixed(1)}km`
       : `${Math.round(remain)}m`;
+  } else if (targetIdx >= waypoints.length) {
+    remEl.textContent = '0m';
   }
 
   if (navStartTime) {
@@ -901,6 +908,7 @@ function startGPS() {
 
 function onGPSUpdate(pos) {
   const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  currentPos = { lat, lon };
   const heading = pos.coords.heading;
   posMarker.setLatLng([lat, lon]);
   if (heading != null && !isNaN(heading)) {
