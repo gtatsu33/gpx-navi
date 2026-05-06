@@ -537,10 +537,10 @@ function updateCurrentTrkIdx(lat, lon) {
       const d = geoDist(lat, lon, track[i].lat, track[i].lon);
       if (d < bestD) { bestD = d; bestI = i; }
     }
-    currentTrkIdx = bestI;
+    currentTrkIdx = Math.max(currentTrkIdx, bestI);
     return;
   }
-  
+
   const s = Math.max(0, currentTrkIdx - 5);
   const e = Math.min(track.length - 1, currentTrkIdx + 60);
   let bestD = Infinity, bestI = currentTrkIdx;
@@ -548,7 +548,7 @@ function updateCurrentTrkIdx(lat, lon) {
     const d = geoDist(lat, lon, track[i].lat, track[i].lon);
     if (d < bestD) { bestD = d; bestI = i; }
   }
-  currentTrkIdx = bestI;
+  currentTrkIdx = Math.max(currentTrkIdx, bestI);
 }
 
 function renderGradeCanvas() {
