@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
 st.title("🚴 GPX ターン検出・強化ツール")
+
+_is_admin = (st.query_params.get("admin", "") == st.secrets.get("ADMIN_TOKEN", "__unset__"))
 st.caption("Stravaなどのターン情報なしGPXにナビ用ターンポイントを追加します")
 
 # ─────────────────────────────────────────────
@@ -593,13 +595,14 @@ if uploaded is None:
     _plabels_pre   = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
     _pprov_pre     = st.session_state.get("_mm_provider", "valhalla")
     _pidx_pre      = 1 if _pprov_pre == "google" else 0
-    if _gkey_pre:
+    if _gkey_pre and _is_admin:
         _sel_pre = st.radio(
             "🗺️ マップマッチング プロバイダ",
             _plabels_pre, index=_pidx_pre, horizontal=True,
         )
         st.session_state["_mm_provider"] = "google" if _sel_pre == _plabels_pre[1] else "valhalla"
     else:
+        st.session_state["_mm_provider"] = "valhalla"
         st.caption("マップマッチング: Valhalla（OSM公開API）")
     st.info("GPXファイルをアップロードしてください（Stravaなどのルートエクスポートが対象）")
     st.stop()
@@ -947,9 +950,8 @@ _provider_labels  = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
 _cur_provider     = st.session_state.get("_mm_provider", "valhalla")
 _provider_idx     = 1 if _cur_provider == "google" else 0
 
-if not _google_available:
+if not _google_available or not _is_admin:
     st.sidebar.radio("プロバイダ", [_provider_labels[0]], index=0, disabled=True)
-    st.sidebar.caption("💡 Google を使うには secrets.toml に `GOOGLE_ROADS_API_KEY` を設定してください")
     st.session_state["_mm_provider"] = "valhalla"
 else:
     _sel_provider = st.sidebar.radio("プロバイダ", _provider_labels, index=_provider_idx)
