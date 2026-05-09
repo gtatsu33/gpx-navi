@@ -15,6 +15,7 @@ import folium
 from streamlit_folium import st_folium
 import requests
 import urllib.parse
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
@@ -284,13 +285,24 @@ def fetch_all_elevations(points, source="auto"):
     prog = st.progress(0, text=f"標高データ取得中（{src_label}）…")
 
     if use_gsi:
-        # 国土地理院: 並列リクエスト（ThreadPoolExecutor + as_completed でプログレス更新）
+        # 国土地理院: スレッドローカルSessionでTCP接続を再利用しながら並列リクエスト
+        _tls = threading.local()
         done = [0]
 
         def _fetch_one(args):
             i, lat, lon = args
+            if not hasattr(_tls, "session"):
+                _tls.session = requests.Session()
             try:
-                return i, _fetch_gsi_elevation(lat, lon)
+                resp = _tls.session.get(
+                    "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
+                    params={"lat": lat, "lon": lon, "outtype": "JSON"},
+                    timeout=12,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                elev = data.get("elevation")
+                return i, (None if (elev is None or elev == -9999) else float(elev))
             except Exception:
                 return i, None
 
@@ -301,22 +313,11 @@ def fetch_all_elevations(points, source="auto"):
                 i, elev = future.result()
                 elevations[i] = elev
                 done[0] += 1
-                prog.progress(done[0] / n,
-                              text=f"標高取得中（国土地理院）… {done[0]}/{n} 点")
+                if done[0] % 10 == 0 or done[0] == n:
+                    prog.progress(done[0] / n,
+                                  text=f"標高取得中（国土地理院）… {done[0]}/{n} 点")
 
-        # GSIで取れなかった点をOpen-Meteoでフォールバック
-        failed = [i for i, e in enumerate(elevations) if e is None]
-        if failed:
-            BATCH = 100
-            for b in range(0, len(failed), BATCH):
-                idxs  = failed[b:b + BATCH]
-                batch = [points[i] for i in idxs]
-                try:
-                    batch_e = _fetch_openmeteo_batch(batch)
-                    for j, idx in enumerate(idxs):
-                        elevations[idx] = batch_e[j]
-                except Exception:
-                    pass
+        # GSIで取れなかった点は元のGPX標高を保持（None のまま = build_enhanced_gpx が元値を使う）
     else:
         # Open-Meteo: バッチ処理（最大100点/リクエスト）
         BATCH = 100
