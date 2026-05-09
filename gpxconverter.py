@@ -219,6 +219,23 @@ def _valhalla_match_chunk(chunk, costing, search_radius):
 
 
 # ─────────────────────────────────────────────
+# マップマッチング（Google Maps Roads API）
+# ─────────────────────────────────────────────
+
+_GOOGLE_ROADS_URL = "https://roads.googleapis.com/v1/snapToRoads"
+
+def _google_roads_match_chunk(chunk, api_key):
+    """Google Roads API snapToRoads で1チャンクをスナップ（最大100点）"""
+    path = "|".join(f"{lat},{lon}" for lat, lon in chunk)
+    resp = requests.get(
+        _GOOGLE_ROADS_URL,
+        params={"path": path, "interpolate": "false", "key": api_key},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+# ─────────────────────────────────────────────
 # 標高補正（国土地理院 / Open-Meteo）
 # ─────────────────────────────────────────────
 
@@ -572,6 +589,18 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
 uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
 
 if uploaded is None:
+    _gkey_pre      = st.secrets.get("GOOGLE_ROADS_API_KEY", None)
+    _plabels_pre   = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
+    _pprov_pre     = st.session_state.get("_mm_provider", "valhalla")
+    _pidx_pre      = 1 if _pprov_pre == "google" else 0
+    if _gkey_pre:
+        _sel_pre = st.radio(
+            "🗺️ マップマッチング プロバイダ",
+            _plabels_pre, index=_pidx_pre, horizontal=True,
+        )
+        st.session_state["_mm_provider"] = "google" if _sel_pre == _plabels_pre[1] else "valhalla"
+    else:
+        st.caption("マップマッチング: Valhalla（OSM公開API）")
     st.info("GPXファイルをアップロードしてください（Stravaなどのルートエクスポートが対象）")
     st.stop()
 
@@ -628,7 +657,8 @@ if st.session_state.get("_mm_status") is None:
         st.session_state["_mm_errors_partial"]      = []
 
 if st.session_state.get("_mm_status") == "running":
-    _MM_CHUNK   = 50
+    _cur_provider = st.session_state.get("_mm_provider", "valhalla")
+    _MM_CHUNK   = 100 if _cur_provider == "google" else 50
     _profile    = st.session_state.get("_mm_profile", "cycling")
     _radius     = st.session_state.get("_mm_radius", 50)
     _costing    = _VALHALLA_COSTING.get(_profile, "bicycle")
@@ -642,7 +672,7 @@ if st.session_state.get("_mm_status") == "running":
         if _cancelled:
             _prog_area.progress(_ci / _n_chunks, text="⏱️ キャンセル待ち中…")
         else:
-            _prog_area.progress(_ci / _n_chunks,
+            _prog_area.progress((_ci + 1) / _n_chunks,
                                 text=f"🗺️ マップマッチング中… {_ci + 1}/{_n_chunks} チャンク")
     with _col_btn:
         if st.button("⏹ キャンセル", key="mm_cancel_btn"):
@@ -665,12 +695,22 @@ if st.session_state.get("_mm_status") == "running":
         _auto_cancel = False
 
         try:
-            _data = _valhalla_match_chunk(points[_s:_e], _costing, _radius)
             _mp_list = st.session_state["_mm_matched_partial"]
-            for _j, _mp in enumerate(_data.get("matched_points", [])):
-                if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
-                    _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
-                    st.session_state["_mm_n_snapped_partial"] += 1
+            if _cur_provider == "google":
+                _gkey = st.secrets.get("GOOGLE_ROADS_API_KEY", "")
+                _data = _google_roads_match_chunk(points[_s:_e], _gkey)
+                for _sp in _data.get("snappedPoints", []):
+                    _orig = _sp.get("originalIndex")
+                    if _orig is not None and _s + _orig < len(_mp_list):
+                        _loc = _sp["location"]
+                        _mp_list[_s + _orig] = (_loc["latitude"], _loc["longitude"])
+                        st.session_state["_mm_n_snapped_partial"] += 1
+            else:
+                _data = _valhalla_match_chunk(points[_s:_e], _costing, _radius)
+                for _j, _mp in enumerate(_data.get("matched_points", [])):
+                    if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
+                        _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
+                        st.session_state["_mm_n_snapped_partial"] += 1
         except requests.exceptions.Timeout:
             if _ci == 0:
                 _auto_cancel = True
@@ -900,13 +940,37 @@ elif mm_status == "キャンセル":
 else:
     st.sidebar.info("⏳ 処理中…")
 
-_sel_mm = st.sidebar.selectbox("プロファイル", _mm_labels, index=_cur_mm_idx)
-st.session_state["_mm_profile"] = _MM_PROFILES[_sel_mm]
+# プロバイダ選択
+_google_key       = st.secrets.get("GOOGLE_ROADS_API_KEY", None)
+_google_available = bool(_google_key)
+_provider_labels  = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
+_cur_provider     = st.session_state.get("_mm_provider", "valhalla")
+_provider_idx     = 1 if _cur_provider == "google" else 0
 
-_cur_radius = st.session_state.get("_mm_radius", 50)
-_mm_radius  = st.sidebar.slider("サーチ半径（m）", 10, 100, _cur_radius, 10,
-                                 help="道路を探索する半径。GPS誤差が大きいルートは大きくする")
-st.session_state["_mm_radius"] = _mm_radius
+if not _google_available:
+    st.sidebar.radio("プロバイダ", [_provider_labels[0]], index=0, disabled=True)
+    st.sidebar.caption("💡 Google を使うには secrets.toml に `GOOGLE_ROADS_API_KEY` を設定してください")
+    st.session_state["_mm_provider"] = "valhalla"
+else:
+    _sel_provider = st.sidebar.radio("プロバイダ", _provider_labels, index=_provider_idx)
+    _new_provider = "google" if _sel_provider == _provider_labels[1] else "valhalla"
+    if _new_provider != _cur_provider:
+        for _k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
+                   "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial",
+                   "_mm_errors_partial", "_mm_cancel_requested"]:
+            st.session_state.pop(_k, None)
+    st.session_state["_mm_provider"] = _new_provider
+    _cur_provider = _new_provider
+
+if _cur_provider == "valhalla":
+    _sel_mm = st.sidebar.selectbox("プロファイル", _mm_labels, index=_cur_mm_idx)
+    st.session_state["_mm_profile"] = _MM_PROFILES[_sel_mm]
+    _cur_radius = st.session_state.get("_mm_radius", 50)
+    _mm_radius  = st.sidebar.slider("サーチ半径（m）", 10, 100, _cur_radius, 10,
+                                     help="道路を探索する半径。GPS誤差が大きいルートは大きくする")
+    st.session_state["_mm_radius"] = _mm_radius
+else:
+    st.sidebar.caption(f"APIキー: ✅ 設定済み")
 
 if mm_status is not None:
     st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
@@ -998,7 +1062,16 @@ with col_map:
     _map_init_loc = ([_saved_center["lat"], _saved_center["lng"]] if _saved_center
                      else active_points[len(active_points)//4])
     _map_init_zoom = st.session_state.get("_map_zoom", 13)
-    m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom)
+    _cur_provider  = st.session_state.get("_mm_provider", "valhalla")
+    if _cur_provider == "google":
+        m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom, tiles=None)
+        folium.TileLayer(
+            tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
+            attr='© <a href="https://www.google.com/maps">Google Maps</a>',
+            name="Google Maps", max_zoom=20,
+        ).add_to(m)
+    else:
+        m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom)
     folium.PolyLine(active_points, color="#3498db", weight=4, opacity=0.8).add_to(m)
     folium.Marker(active_points[0],  tooltip="スタート",
                   icon=folium.Icon(color="green",   icon="play", prefix="fa")).add_to(m)
