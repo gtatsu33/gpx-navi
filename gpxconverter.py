@@ -833,10 +833,17 @@ if st.session_state.get("_elev_status") == "running":
                 except Exception:
                     return _ei, None
             _etasks = [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+            _edone = [0]
             with ThreadPoolExecutor(max_workers=10) as _eex:
                 for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
                     _ei2, _ev2 = _ef.result()
                     _ep[_ei2] = _ev2
+                    _edone[0] += 1
+                    _pts_done = _es + _edone[0]
+                    _elev_prog_area.progress(
+                        _pts_done / _en,
+                        text=f"⛰️ 標高補正中（{_elabel}）… {_pts_done}/{_en} 点",
+                    )
         else:
             try:
                 _ebe = _fetch_openmeteo_batch(active_points[_es:_ee])
@@ -1099,7 +1106,18 @@ if elev_status == "完了":
         st.sidebar.caption("スパイク除去: 補正対象なし")
 elif elev_status == "キャンセル":
     n_ok = st.session_state.get("_elev_n_ok", 0)
-    st.sidebar.warning(f"⚠️ キャンセル済み（{n_ok}/{len(active_points)} 点取得）")
+    src  = st.session_state.get("_elev_source", "")
+    st.sidebar.warning(f"⚠️ キャンセル済み（{n_ok}/{len(active_points)} 点取得・{src}）")
+    clean_stats = st.session_state.get("_elev_clean_stats", {})
+    clean_points = clean_stats.get("points", 0)
+    if clean_points:
+        st.sidebar.caption(
+            f"スパイク除去: {clean_stats.get('clusters', 0)} 箇所 / {clean_points} 点補正 "
+            f"（最大勾配 {clean_stats.get('max_grade_before', 0):.1f}% → "
+            f"{clean_stats.get('max_grade_after', 0):.1f}%）"
+        )
+    else:
+        st.sidebar.caption("スパイク除去: 補正対象なし")
 elif elev_status == "エラー":
     st.sidebar.warning("⚠️ 一部取得失敗")
 elif elev_status == "スキップ":
