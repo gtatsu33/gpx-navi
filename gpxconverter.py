@@ -634,6 +634,7 @@ _STATE_KEYS = [
     "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
     "_elevations",    "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
+    "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
     "_iname_status",  "_iname_n_found",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
@@ -647,7 +648,6 @@ _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 # 自動処理（マップマッチング・標高補正）
 # ─────────────────────────────────────────────
 _needs_rerun = False
-_mm_ran      = False
 
 if st.session_state.get("_mm_status") is None:
     if _has_wpts and not st.session_state.pop("_force_mm", False):
@@ -741,40 +741,119 @@ if st.session_state.get("_mm_status") == "running":
             st.session_state["_mm_status"]      = "完了" if _n_sn > 0 else "エラー"
             for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
                 st.session_state.pop(_k, None)
-            _mm_ran      = True
-            _needs_rerun = True
+            # edit_turns 座標同期をここで完了させ、即 rerun でキャンセルボタンを非表示にする
+            _active_mm = st.session_state["_matched_points"]
+            if "edit_turns" in st.session_state:
+                for _t in st.session_state["edit_turns"]:
+                    _tidx = _t.get("index", 0)
+                    if _tidx < len(_active_mm):
+                        _t["lat"] = _active_mm[_tidx][0]
+                        _t["lon"] = _active_mm[_tidx][1]
+            st.rerun()
         else:
             st.session_state["_mm_chunk_idx"] = _ci + 1
             st.rerun()
 
 active_points = st.session_state.get("_matched_points", points)
 
-# MM 再実行時、edit_turns の wpt 座標を新しい trkpt 座標に同期する
-if _mm_ran and "edit_turns" in st.session_state:
-    for t in st.session_state["edit_turns"]:
-        idx = t.get("index", 0)
-        if idx < len(active_points):
-            t["lat"] = active_points[idx][0]
-            t["lon"] = active_points[idx][1]
-
+# 標高補正 トリガー（初回 / 強制再処理）
 if st.session_state.get("_elev_status") is None:
     if _has_wpts and not st.session_state.pop("_force_elev", False):
         st.session_state["_elev_status"] = "スキップ"
     else:
-        _src = st.session_state.get("_elev_src", "auto")
-        with st.spinner("⛰️ 標高補正処理中…"):
-            elevs, src_used, n_ok = fetch_all_elevations(active_points, source=_src)
-            elevs, clean_stats = clean_elevation_spikes(
-                active_points, elevs,
-                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
-                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
-            )
-        st.session_state["_elevations"]  = elevs
-        st.session_state["_elev_source"] = src_used
-        st.session_state["_elev_n_ok"]   = n_ok
-        st.session_state["_elev_clean_stats"] = clean_stats
-        st.session_state["_elev_status"] = "完了" if n_ok > 0 else "エラー"
+        st.session_state["_elev_status"]    = "running"
+        st.session_state["_elev_batch_idx"] = 0
+        st.session_state["_elev_partial"]   = [None] * len(active_points)
+        st.rerun()
+
+# 標高補正 実行ループ（1 rerun = 1 バッチ）
+if st.session_state.get("_elev_status") == "running":
+    _esrc       = st.session_state.get("_elev_src", "auto")
+    _en         = len(active_points)
+    _in_japan   = _is_in_japan(active_points[0][0], active_points[0][1]) if active_points else False
+    _use_gsi    = (_esrc == "gsi") or (_esrc == "auto" and _in_japan)
+    _elabel     = "国土地理院" if _use_gsi else "Open-Meteo"
+    _E_BATCH    = 50 if _use_gsi else 100
+    _en_batches = math.ceil(_en / _E_BATCH)
+    _ebi        = st.session_state.get("_elev_batch_idx", 0)
+    _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
+
+    _ecol_prog, _ecol_btn = st.columns([5, 1])
+    with _ecol_prog:
+        _elev_prog_area = st.empty()
+        _elev_prog_area.progress(
+            _ebi / _en_batches,
+            text=f"⛰️ 標高補正中（{_elabel}）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
+        )
+    with _ecol_btn:
+        if st.button("⏹ キャンセル", key="elev_cancel_btn"):
+            st.session_state["_elev_cancel_requested"] = True
+            st.rerun()
+
+    def _finalize_elev(elevs, cancelled=False):
+        elevs, _cs = clean_elevation_spikes(
+            active_points, elevs,
+            bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
+            cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
+        )
+        _nok = sum(1 for e in elevs if e is not None)
+        st.session_state["_elevations"]       = elevs
+        st.session_state["_elev_source"]      = _elabel + ("（キャンセル）" if cancelled else "")
+        st.session_state["_elev_n_ok"]        = _nok
+        st.session_state["_elev_clean_stats"] = _cs
+        st.session_state["_elev_status"]      = "キャンセル" if cancelled else ("完了" if _nok > 0 else "エラー")
+        for _ek in ["_elev_batch_idx", "_elev_partial"]:
+            st.session_state.pop(_ek, None)
+
+    if _ecancelled:
+        _ep = st.session_state.get("_elev_partial", [None] * _en)
+        _finalize_elev(_ep, cancelled=True)
+        _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
         _needs_rerun = True
+    else:
+        _es = _ebi * _E_BATCH
+        _ee = min(_es + _E_BATCH, _en)
+        _ep = st.session_state.get("_elev_partial", [None] * _en)
+
+        if _use_gsi:
+            _etls = threading.local()
+            def _efetch(args):
+                _ei, _elat, _elon = args
+                if not hasattr(_etls, "session"):
+                    _etls.session = requests.Session()
+                try:
+                    _er = _etls.session.get(
+                        "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
+                        params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
+                        timeout=12,
+                    )
+                    _er.raise_for_status()
+                    _ev = _er.json().get("elevation")
+                    return _ei, (None if (_ev is None or _ev == -9999) else float(_ev))
+                except Exception:
+                    return _ei, None
+            _etasks = [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+            with ThreadPoolExecutor(max_workers=10) as _eex:
+                for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
+                    _ei2, _ev2 = _ef.result()
+                    _ep[_ei2] = _ev2
+        else:
+            try:
+                _ebe = _fetch_openmeteo_batch(active_points[_es:_ee])
+                for _ej, _ev3 in enumerate(_ebe):
+                    _ep[_es + _ej] = _ev3
+            except Exception:
+                pass
+
+        st.session_state["_elev_partial"] = _ep
+
+        if _ebi + 1 >= _en_batches:
+            _finalize_elev(_ep)
+            _elev_prog_area.progress(1.0, text=f"✅ 標高補正完了（{st.session_state['_elev_n_ok']}/{_en} 点）")
+            _needs_rerun = True
+        else:
+            st.session_state["_elev_batch_idx"] = _ebi + 1
+            st.rerun()
 
 if _needs_rerun:
     st.rerun()
@@ -1018,6 +1097,9 @@ if elev_status == "完了":
         )
     else:
         st.sidebar.caption("スパイク除去: 補正対象なし")
+elif elev_status == "キャンセル":
+    n_ok = st.session_state.get("_elev_n_ok", 0)
+    st.sidebar.warning(f"⚠️ キャンセル済み（{n_ok}/{len(active_points)} 点取得）")
 elif elev_status == "エラー":
     st.sidebar.warning("⚠️ 一部取得失敗")
 elif elev_status == "スキップ":
@@ -1044,7 +1126,8 @@ st.session_state["_elev_cluster_gap"] = float(_elev_cluster_gap)
 if elev_status is not None:
     st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
     if st.sidebar.button("🔄 再処理", key="elev_reset"):
-        for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats"]:
+        for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
+                  "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested"]:
             st.session_state.pop(k, None)
         st.session_state["_force_elev"]           = True
         st.session_state["_skip_map_center_save"] = True
