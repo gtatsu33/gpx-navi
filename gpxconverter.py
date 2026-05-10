@@ -411,8 +411,9 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
     BAD_GRADE_THRESHOLD = bad_grade_threshold
     HARD_SPIKE_THRESHOLD = 35.0
     NEAR_BAD_THRESHOLD = 15.0
-    MIN_ELEVATION_JUMP_M = 2.0  # 距離を加味しない高低差の条件は不要かもしれない
+    MIN_ELEVATION_JUMP_M = 2.0
     NEAR_ELEVATION_JUMP_M = 3.0
+    SHORT_SEG_M = 10.0  # この距離以下のセグメントはdz条件を免除（密なGPS点でのSRTMグリッド境界対策）
     CLUSTER_GAP_M = cluster_gap_m
     MERGE_GAP_M = 50.0
     MAX_ANCHOR_SEARCH_M = 600.0
@@ -432,10 +433,11 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
         if grade is None or cleaned[i] is None or cleaned[i + 1] is None:
             continue
         dz = cleaned[i + 1] - cleaned[i]
+        short_seg = (cum_dists[i + 1] - cum_dists[i]) < SHORT_SEG_M
         if (
-            abs(grade) >= BAD_GRADE_THRESHOLD and abs(dz) >= MIN_ELEVATION_JUMP_M
+            abs(grade) >= BAD_GRADE_THRESHOLD and (short_seg or abs(dz) >= MIN_ELEVATION_JUMP_M)
         ) or (
-            abs(grade) >= HARD_SPIKE_THRESHOLD and abs(dz) >= NEAR_ELEVATION_JUMP_M
+            abs(grade) >= HARD_SPIKE_THRESHOLD and (short_seg or abs(dz) >= NEAR_ELEVATION_JUMP_M)
         ):
             bad_segments.append(i)
 
@@ -450,10 +452,11 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
                 continue
             seg_center = (cum_dists[i] + cum_dists[i + 1]) / 2
             dz = cleaned[i + 1] - cleaned[i]
+            short_seg = (cum_dists[i + 1] - cum_dists[i]) < SHORT_SEG_M
             if (
                 abs(seg_center - center) <= CLUSTER_GAP_M
                 and abs(grade) >= NEAR_BAD_THRESHOLD
-                and abs(dz) >= NEAR_ELEVATION_JUMP_M
+                and (short_seg or abs(dz) >= NEAR_ELEVATION_JUMP_M)
             ):
                 near_segments.add(i)
 
