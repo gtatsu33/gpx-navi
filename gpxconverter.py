@@ -508,8 +508,12 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
     for cluster in clusters:
         start_pt = cluster["start_seg"]
         end_pt = cluster["end_seg"] + 1
-        left_anchor = start_pt if is_left_boundary_anchor(start_pt) else find_anchor(start_pt - 1, -1)
-        right_anchor = end_pt if is_right_boundary_anchor(end_pt) else find_anchor(end_pt + 1, 1)
+        # 境界アンカー候補がスパイク隣接点の場合は is_anchor_candidate で弾く
+        # （隣接勾配チェックが入るため、スパイク端点は自動的に除外される）
+        left_anchor = (start_pt if (is_left_boundary_anchor(start_pt) and is_anchor_candidate(start_pt))
+                       else find_anchor(start_pt - 1, -1))
+        right_anchor = (end_pt if (is_right_boundary_anchor(end_pt) and is_anchor_candidate(end_pt))
+                        else find_anchor(end_pt + 1, 1))
         if left_anchor is None or right_anchor is None or left_anchor >= right_anchor:
             continue
         dist_m = cum_dists[right_anchor] - cum_dists[left_anchor]
