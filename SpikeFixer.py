@@ -1,312 +1,668 @@
+"""
+SpikeFixer.py  -  スパイク補正スタンドアロンツール
+
+gpxconverter.py の clean_elevation_spikes を単独で実行する。
+調整・デバッグ後、最終的に gpxconverter.py へ書き戻す想定。
+
+使い方:
+  python SpikeFixer.py input.gpx output.gpx compare.txt
+  python SpikeFixer.py input.gpx output.gpx compare.txt --threshold 12.0 --gap 200.0
+
+オプション:
+  --threshold  バッドセグメント判定の勾配閾値(%) デフォルト 15.0
+  --gap        クラスタ分割距離(m)               デフォルト 250.0
+"""
+
 import sys
 import math
-import xml.etree.ElementTree as ET
-from statistics import median
-from datetime import datetime
+import time
+import argparse
+import numpy as np
+import gpxpy
+import gpxpy.gpx
 
-# ====================================================================
-#  定数一覧 (SpikeFix.txt より)
-# ====================================================================
-BAD_GRADE_THRESHOLD = 15.0      # 通常スパイク判定の勾配閾値 (%)
-HARD_SPIKE_THRESHOLD = 35.0     # ハードスパイク判定の勾配閾値 (%)
-NEAR_BAD_THRESHOLD = 15.0       # クラスタ拡張時の勾配閾値 (%)
-MIN_ELEVATION_JUMP_M = 2.0      # 通常スパイク判定の高低差閾値 (m)
-NEAR_ELEVATION_JUMP_M = 3.0     # ハード・拡張時の高低差閾値 (m)
-SHORT_SEG_M = 10.0              # 高低差条件を免除する点間距離 (m)
-CLUSTER_GAP_M = 250.0           # クラスタ拡張の走査距離 (m)
-MERGE_GAP_M = 50.0              # 修復範囲をマージする距離 (m)
-MAX_ANCHOR_SEARCH_M = 600.0     # アンカー探索の最大距離 (m)
-ANCHOR_GRADE_LIMIT = 12.0       # アンカー候補の隣接勾配上限 (%)
-BOUNDARY_GRADE_LIMIT = 13.0     # 境界アンカー高速判定の勾配上限 (%)
-MEDIAN_WINDOW_M = 150.0         # 局所中央値の計算ウィンドウ (m)
-ANCHOR_MEDIAN_DEV_M = 5.0       # アンカー候補の中央値からの許容偏差 (m)
-MAX_ANCHOR_GRADE = 15.0         # アンカー間の正味勾配上限 (%)
+# ═══════════════════════════════════════════════════════════════════
+#  gpxconverter.py からそのままコピーした関数群
+#  ※ この区間は gpxconverter.py と完全に同一に保つこと
+# ═══════════════════════════════════════════════════════════════════
 
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """2点間の距離(m)を計算する"""
-    R = 6371000  # 地球の半径
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin((lon2-lon1)/2)**2
+    return R * 2 * math.asin(math.sqrt(max(0, a)))
 
-def clean_elevation_spikes(points):
+def _cumulative_distances(points):
+    cum = [0.0]
+    for i in range(1, len(points)):
+        cum.append(cum[-1] + haversine(
+            points[i - 1][0], points[i - 1][1],
+            points[i][0], points[i][1],
+        ))
+    return cum
+
+def _elevation_grades(points, elevations, cum_dists=None):
+    if cum_dists is None:
+        cum_dists = _cumulative_distances(points)
+    grades = []
+    for i in range(len(points) - 1):
+        if elevations[i] is None or elevations[i + 1] is None:
+            grades.append(None)
+            continue
+        dist = cum_dists[i + 1] - cum_dists[i]
+        if dist <= 0:
+            grades.append(None)
+            continue
+        grades.append((elevations[i + 1] - elevations[i]) / dist * 100)
+    return grades
+
+def _local_median_elevation(i, cum_dists, elevations, window_m):
+    lo = cum_dists[i] - window_m
+    hi = cum_dists[i] + window_m
+    vals = [
+        e for j, e in enumerate(elevations)
+        if e is not None and lo <= cum_dists[j] <= hi
+    ]
+    return float(np.median(vals)) if vals else None
+
+def _cluster_segments(seg_indexes, cum_dists, cluster_gap_m):
+    if not seg_indexes:
+        return []
+    clusters = []
+    cur = {"start_seg": seg_indexes[0], "end_seg": seg_indexes[0]}
+    for seg_idx in seg_indexes[1:]:
+        gap_m = cum_dists[seg_idx] - cum_dists[cur["end_seg"] + 1]
+        if gap_m <= cluster_gap_m:
+            cur["end_seg"] = seg_idx
+        else:
+            clusters.append(cur)
+            cur = {"start_seg": seg_idx, "end_seg": seg_idx}
+    clusters.append(cur)
+    return clusters
+
+def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster_gap_m=250.0):
     """
-    スパイク補正アルゴリズム
-    引数 points: [{'lat':, 'lon':, 'ele':, 'dist':, 'cum_dist':}, ...] のリスト
-    戻り値: 補正後の points, ログ用データ
+    標高API由来の局所スパイクを前後アンカーの線形補間で除去する。
+    戻り値: (cleaned_elevations, stats)
     """
     n = len(points)
-    if n < 2:
-        return points, []
+    if n < 4 or not elevations or len(elevations) != n:
+        return elevations, {"clusters": 0, "points": 0, "max_grade_before": 0.0, "max_grade_after": 0.0}
 
-    # ログ用：各点の属性を記録する
-    point_attr = [ {
-        'grade_prev': 0.0, 'ele_diff': 0.0, 'spike_type': '', 
-        'cluster_id': -1, 'is_anchor': False, 'new_ele': p['ele']
-    } for p in points ]
+    BAD_GRADE_THRESHOLD = bad_grade_threshold
+    HARD_SPIKE_THRESHOLD = 35.0
+    NEAR_BAD_THRESHOLD = 15.0
+    MIN_ELEVATION_JUMP_M = 2.0
+    NEAR_ELEVATION_JUMP_M = 3.0
+    SHORT_SEG_M = 10.0  # この距離以下のセグメントはdz条件を免除（密なGPS点でのSRTMグリッド境界対策）
+    CLUSTER_GAP_M = cluster_gap_m
+    MERGE_GAP_M = 50.0
+    MAX_ANCHOR_SEARCH_M = 600.0
+    ANCHOR_GRADE_LIMIT = 12.0
+    BOUNDARY_GRADE_LIMIT = 13.0
+    MEDIAN_WINDOW_M = 150.0
+    ANCHOR_MEDIAN_DEV_M = 5.0
+    MAX_ANCHOR_GRADE = 15.0
+    MIN_CORRECTION_GRADE_PCT = 1.0  # 隣接最短セグメントの1%未満の補正は無視（短距離セグメント対策）
 
-    # --- フェーズ1：バッドセグメントの検出 ---
+    cleaned = list(elevations)
+    cum_dists = _cumulative_distances(points)
+    grades = _elevation_grades(points, cleaned, cum_dists)
+    max_grade_before = max((abs(g) for g in grades if g is not None), default=0.0)
+
     bad_segments = []
-    for i in range(1, n):
-        p1, p2 = points[i-1], points[i]
-        dist = p2['cum_dist'] - p1['cum_dist']
-        if dist <= 0: continue
-        
-        ele_diff = abs(p2['ele'] - p1['ele'])
-        grade = (ele_diff / dist) * 100
-        point_attr[i]['grade_prev'] = grade
-        point_attr[i]['ele_diff'] = ele_diff
-
-        is_bad = False
-        # 通常スパイク
-        if grade >= BAD_GRADE_THRESHOLD and (dist < SHORT_SEG_M or ele_diff >= MIN_ELEVATION_JUMP_M):
-            is_bad = True
-            point_attr[i]['spike_type'] = 'Normal'
-        # ハードスパイク
-        if grade >= HARD_SPIKE_THRESHOLD and (dist < SHORT_SEG_M or ele_diff >= NEAR_ELEVATION_JUMP_M):
-            is_bad = True
-            point_attr[i]['spike_type'] = 'Hard'
-        
-        if is_bad:
+    for i, grade in enumerate(grades):
+        if grade is None or cleaned[i] is None or cleaned[i + 1] is None:
+            continue
+        dz = cleaned[i + 1] - cleaned[i]
+        short_seg = (cum_dists[i + 1] - cum_dists[i]) < SHORT_SEG_M
+        if (
+            abs(grade) >= BAD_GRADE_THRESHOLD and (short_seg or abs(dz) >= MIN_ELEVATION_JUMP_M)
+        ) or (
+            abs(grade) >= HARD_SPIKE_THRESHOLD and (short_seg or abs(dz) >= NEAR_ELEVATION_JUMP_M)
+        ):
             bad_segments.append(i)
 
     if not bad_segments:
-        return points, point_attr
+        return cleaned, {"clusters": 0, "points": 0, "max_grade_before": max_grade_before, "max_grade_after": max_grade_before}
 
-    # --- フェーズ2：周辺セグメントの取り込み（クラスタリング） ---
-    clusters = []
-    used_indices = set()
-    for start_idx in bad_segments:
-        if start_idx in used_indices: continue
-        
-        # クラスタ初期化
-        current_cluster = {start_idx}
-        used_indices.add(start_idx)
-        
-        # 前後 CLUSTER_GAP_M 以内をスキャン
-        for i in range(1, n):
-            if i in used_indices: continue
-            p_target = points[i]
-            # クラスタ内のいずれかの点から距離内かチェック
-            in_range = any(abs(p_target['cum_dist'] - points[c]['cum_dist']) <= CLUSTER_GAP_M for c in current_cluster)
-            if in_range:
-                p1, p2 = points[i-1], points[i]
-                d = p2['cum_dist'] - p1['cum_dist']
-                if d > 0:
-                    diff = abs(p2['ele'] - p1['ele'])
-                    g = (diff / d) * 100
-                    if g >= NEAR_BAD_THRESHOLD and (d < SHORT_SEG_M or diff >= NEAR_ELEVATION_JUMP_M):
-                        current_cluster.add(i)
-                        used_indices.add(i)
-        
-        cluster_list = sorted(list(current_cluster))
-        clusters.append({'indices': cluster_list, 'start': cluster_list[0], 'end': cluster_list[-1]})
+    near_segments = set(bad_segments)
+    for bad_idx in bad_segments:
+        center = (cum_dists[bad_idx] + cum_dists[bad_idx + 1]) / 2
+        for i, grade in enumerate(grades):
+            if grade is None or cleaned[i] is None or cleaned[i + 1] is None:
+                continue
+            seg_center = (cum_dists[i] + cum_dists[i + 1]) / 2
+            dz = cleaned[i + 1] - cleaned[i]
+            short_seg = (cum_dists[i + 1] - cum_dists[i]) < SHORT_SEG_M
+            if (
+                abs(seg_center - center) <= CLUSTER_GAP_M
+                and abs(grade) >= NEAR_BAD_THRESHOLD
+                and (short_seg or abs(dz) >= NEAR_ELEVATION_JUMP_M)
+            ):
+                near_segments.add(i)
 
-    for idx, c in enumerate(clusters):
-        for i in c['indices']: point_attr[i]['cluster_id'] = idx
+    clusters = _cluster_segments(sorted(near_segments), cum_dists, CLUSTER_GAP_M)
 
-    # --- フェーズ3：アンカーの選定 ---
+    def is_anchor_candidate(i):
+        if i <= 0 or i >= n - 1 or cleaned[i] is None:
+            return False
+        prev_g = grades[i - 1]
+        next_g = grades[i]
+        if prev_g is None or next_g is None:
+            return False
+        if abs(prev_g) > ANCHOR_GRADE_LIMIT or abs(next_g) > ANCHOR_GRADE_LIMIT:
+            return False
+        local_med = _local_median_elevation(i, cum_dists, cleaned, MEDIAN_WINDOW_M)
+        return local_med is not None and abs(cleaned[i] - local_med) <= ANCHOR_MEDIAN_DEV_M
+
+    def find_anchor(start_i, direction):
+        start_dist = cum_dists[start_i]
+        i = start_i
+        stable_run = []
+        while 0 < i < n - 1 and abs(cum_dists[i] - start_dist) <= MAX_ANCHOR_SEARCH_M:
+            if is_anchor_candidate(i):
+                stable_run.append(i)
+                if len(stable_run) >= 2:
+                    return stable_run[0]
+            else:
+                stable_run = []
+            i += direction
+        return None
+
+    def is_left_boundary_anchor(i):
+        return (
+            0 < i < n - 1
+            and cleaned[i] is not None
+            and grades[i - 1] is not None
+            and abs(grades[i - 1]) <= BOUNDARY_GRADE_LIMIT
+        )
+
+    def is_right_boundary_anchor(i):
+        return (
+            0 < i < n - 1
+            and cleaned[i] is not None
+            and grades[i] is not None
+            and abs(grades[i]) <= BOUNDARY_GRADE_LIMIT
+        )
+
     repair_ranges = []
+    for cluster in clusters:
+        start_pt = cluster["start_seg"]
+        end_pt = cluster["end_seg"] + 1
+        # 境界アンカー候補がスパイク隣接点の場合は is_anchor_candidate で弾く
+        # （隣接勾配チェックが入るため、スパイク端点は自動的に除外される）
+        left_anchor = (start_pt if (is_left_boundary_anchor(start_pt) and is_anchor_candidate(start_pt))
+                       else find_anchor(start_pt - 1, -1))
+        right_anchor = (end_pt if (is_right_boundary_anchor(end_pt) and is_anchor_candidate(end_pt))
+                        else find_anchor(end_pt + 1, 1))
+        if left_anchor is None or right_anchor is None or left_anchor >= right_anchor:
+            continue
+        dist_m = cum_dists[right_anchor] - cum_dists[left_anchor]
+        if dist_m <= 0 or cleaned[left_anchor] is None or cleaned[right_anchor] is None:
+            continue
+        net_grade = (cleaned[right_anchor] - cleaned[left_anchor]) / dist_m * 100
+        if abs(net_grade) > MAX_ANCHOR_GRADE:
+            continue
+        repair_ranges.append({
+            "left": left_anchor,
+            "right": right_anchor,
+            "bad_start": start_pt,
+            "bad_end": end_pt,
+        })
 
-    def is_anchor_candidate(idx):
-        if idx <= 0 or idx >= n - 1: return False
-        # 1. 前後勾配が 12% 以下
-        g_prev = point_attr[idx]['grade_prev']
-        # 次のセグメント勾配を計算
-        d_next = points[idx+1]['cum_dist'] - points[idx]['cum_dist']
-        g_next = (abs(points[idx+1]['ele'] - points[idx]['ele']) / d_next * 100) if d_next > 0 else 0
-        if g_prev > ANCHOR_GRADE_LIMIT or g_next > ANCHOR_GRADE_LIMIT: return False
-        
-        # 2. 前後150m以内の中央値との差が 5m 以内
-        window = [p['ele'] for p in points if abs(p['cum_dist'] - points[idx]['cum_dist']) <= MEDIAN_WINDOW_M]
-        if not window: return False
-        if abs(points[idx]['ele'] - median(window)) > ANCHOR_MEDIAN_DEV_M: return False
-        return True
-
-    for c in clusters:
-        left_anchor = None
-        right_anchor = None
-        
-        # 左アンカー探し (外側方向)
-        search_idx = c['start'] - 1
-        found_candidates = 0
-        while search_idx >= 0 and (points[c['start']]['cum_dist'] - points[search_idx]['cum_dist'] <= MAX_ANCHOR_SEARCH_M):
-            # 境界アンカー高速判定
-            if search_idx == c['start'] - 1:
-                d_next = points[search_idx+1]['cum_dist'] - points[search_idx]['cum_dist']
-                g_next = (abs(points[search_idx+1]['ele'] - points[search_idx]['ele']) / d_next * 100) if d_next > 0 else 0
-                if g_next <= BOUNDARY_GRADE_LIMIT and is_anchor_candidate(search_idx):
-                    left_anchor = search_idx
-                    break
-            
-            if is_anchor_candidate(search_idx):
-                found_candidates += 1
-                if found_candidates >= 2:
-                    left_anchor = search_idx
-                    break
-            else:
-                found_candidates = 0
-            search_idx -= 1
-            
-        # 右アンカー探し
-        search_idx = c['end'] + 1
-        found_candidates = 0
-        while search_idx < n and (points[search_idx]['cum_dist'] - points[c['end']]['cum_dist'] <= MAX_ANCHOR_SEARCH_M):
-            if search_idx == c['end'] + 1:
-                d_prev = points[search_idx]['cum_dist'] - points[search_idx-1]['cum_dist']
-                g_prev = (abs(points[search_idx]['ele'] - points[search_idx-1]['ele']) / d_prev * 100) if d_prev > 0 else 0
-                if g_prev <= BOUNDARY_GRADE_LIMIT and is_anchor_candidate(search_idx):
-                    right_anchor = search_idx
-                    break
-
-            if is_anchor_candidate(search_idx):
-                found_candidates += 1
-                if found_candidates >= 2:
-                    right_anchor = search_idx
-                    break
-            else:
-                found_candidates = 0
-            search_idx += 1
-            
-        if left_anchor is not None and right_anchor is not None:
-            # 正味勾配チェック
-            dist = points[right_anchor]['cum_dist'] - points[left_anchor]['cum_dist']
-            net_grade = (abs(points[right_anchor]['ele'] - points[left_anchor]['ele']) / dist * 100) if dist > 0 else 0
-            if net_grade <= MAX_ANCHOR_GRADE:
-                repair_ranges.append((left_anchor, right_anchor))
-
-    # --- フェーズ4：修復範囲のマージ ---
     if not repair_ranges:
-        return points, point_attr
-        
-    repair_ranges.sort()
-    merged_ranges = []
-    if repair_ranges:
-        curr_start, curr_end = repair_ranges[0]
-        for i in range(1, len(repair_ranges)):
-            next_start, next_end = repair_ranges[i]
-            # 重なるか、50m以内に隣接する場合
-            gap = points[next_start]['cum_dist'] - points[curr_end]['cum_dist']
-            if next_start <= curr_end or gap <= MERGE_GAP_M:
-                curr_end = max(curr_end, next_end)
+        return cleaned, {"clusters": 0, "points": 0, "max_grade_before": max_grade_before, "max_grade_after": max_grade_before}
+
+    repair_ranges.sort(key=lambda r: r["left"])
+    merged = [repair_ranges[0]]
+    for r in repair_ranges[1:]:
+        prev = merged[-1]
+        gap_m = cum_dists[r["left"]] - cum_dists[prev["right"]]
+        if r["left"] <= prev["right"] or gap_m <= MERGE_GAP_M:
+            prev["right"] = max(prev["right"], r["right"])
+            prev["bad_start"] = min(prev["bad_start"], r["bad_start"])
+            prev["bad_end"] = max(prev["bad_end"], r["bad_end"])
+        else:
+            merged.append(r)
+
+    corrected_points = set()
+    for r in merged:
+        left = r["left"]
+        right = r["right"]
+        if right - left < 2:
+            continue
+        dist_m = cum_dists[right] - cum_dists[left]
+        if dist_m <= 0 or cleaned[left] is None or cleaned[right] is None:
+            continue
+        net_grade = (cleaned[right] - cleaned[left]) / dist_m * 100
+        if abs(net_grade) > MAX_ANCHOR_GRADE:
+            continue
+        for i in range(left + 1, right):
+            if cleaned[i] is None:
+                continue
+            ratio = (cum_dists[i] - cum_dists[left]) / dist_m
+            new_ele = cleaned[left] + (cleaned[right] - cleaned[left]) * ratio
+            min_adj = min(cum_dists[i] - cum_dists[i - 1], cum_dists[i + 1] - cum_dists[i])
+            if abs(cleaned[i] - new_ele) >= MIN_CORRECTION_GRADE_PCT / 100 * min_adj:
+                cleaned[i] = round(new_ele, 1)
+                corrected_points.add(i)
+
+    grades_after = _elevation_grades(points, cleaned, cum_dists)
+    max_grade_after = max((abs(g) for g in grades_after if g is not None), default=0.0)
+    return cleaned, {
+        "clusters": len(merged),
+        "points": len(corrected_points),
+        "max_grade_before": max_grade_before,
+        "max_grade_after": max_grade_after,
+    }
+
+# ═══════════════════════════════════════════════════════════════════
+#  ここから下は SpikeFixer.py 独自のコード
+# ═══════════════════════════════════════════════════════════════════
+
+def _analyze_spikes(points, elevations, bad_grade_threshold=15.0, cluster_gap_m=250.0):
+    """
+    clean_elevation_spikes と同じロジックを再実行し、内部状態を診断データとして返す。
+    compare ファイル生成専用。補正は行わない。
+    """
+    n = len(points)
+
+    BAD_GRADE_THRESHOLD  = bad_grade_threshold
+    HARD_SPIKE_THRESHOLD = 35.0
+    NEAR_BAD_THRESHOLD   = 15.0
+    MIN_ELEVATION_JUMP_M = 2.0
+    NEAR_ELEVATION_JUMP_M = 3.0
+    SHORT_SEG_M           = 10.0
+    CLUSTER_GAP_M         = cluster_gap_m
+    MERGE_GAP_M           = 50.0
+    MAX_ANCHOR_SEARCH_M   = 600.0
+    ANCHOR_GRADE_LIMIT    = 12.0
+    BOUNDARY_GRADE_LIMIT  = 13.0
+    MEDIAN_WINDOW_M       = 150.0
+    ANCHOR_MEDIAN_DEV_M   = 5.0
+    MAX_ANCHOR_GRADE      = 15.0
+
+    cleaned   = list(elevations)
+    cum_dists = _cumulative_distances(points)
+    grades    = _elevation_grades(points, cleaned, cum_dists)
+
+    # --- フェーズ1: バッドセグメント検出 ---
+    bad_segs     = []   # セグメントインデックスのリスト
+    seg_type     = {}   # seg_idx -> "通常スパイク" / "通常スパイク(短距離)" / "ハードスパイク" / "ハードスパイク(短距離)"
+    for i, grade in enumerate(grades):
+        if grade is None or cleaned[i] is None or cleaned[i+1] is None:
+            continue
+        dz    = cleaned[i+1] - cleaned[i]
+        dist  = cum_dists[i+1] - cum_dists[i]
+        short = dist < SHORT_SEG_M
+        is_hard = abs(grade) >= HARD_SPIKE_THRESHOLD and (short or abs(dz) >= NEAR_ELEVATION_JUMP_M)
+        is_norm = abs(grade) >= BAD_GRADE_THRESHOLD  and (short or abs(dz) >= MIN_ELEVATION_JUMP_M)
+        if is_hard or is_norm:
+            bad_segs.append(i)
+            if is_hard:
+                seg_type[i] = "ハードスパイク(短距離)" if short else "ハードスパイク"
             else:
-                merged_ranges.append((curr_start, curr_end))
-                curr_start, curr_end = next_start, next_end
-        merged_ranges.append((curr_start, curr_end))
+                seg_type[i] = "通常スパイク(短距離)"  if short else "通常スパイク"
 
-    # --- フェーズ5：線形補間 ---
-    for r_start, r_end in merged_ranges:
-        point_attr[r_start]['is_anchor'] = True
-        point_attr[r_end]['is_anchor'] = True
-        ele_l = points[r_start]['ele']
-        ele_r = points[r_end]['ele']
-        dist_l = points[r_start]['cum_dist']
-        dist_r = points[r_end]['cum_dist']
-        total_dist = dist_r - dist_l
-        
-        for i in range(r_start + 1, r_end):
-            ratio = (points[i]['cum_dist'] - dist_l) / total_dist
-            new_ele = ele_l + (ele_r - ele_l) * ratio
-            # 0.5m 未満の差は変更しない
-            if abs(new_ele - points[i]['ele']) >= 0.5:
-                points[i]['ele'] = round(new_ele, 2)
-                point_attr[i]['new_ele'] = points[i]['ele']
+    # --- フェーズ2: 近傍セグメント取り込み ---
+    near_segs = set(bad_segs)
+    for bad_idx in bad_segs:
+        center = (cum_dists[bad_idx] + cum_dists[bad_idx+1]) / 2
+        for i, grade in enumerate(grades):
+            if grade is None or cleaned[i] is None or cleaned[i+1] is None:
+                continue
+            seg_center = (cum_dists[i] + cum_dists[i+1]) / 2
+            dz    = cleaned[i+1] - cleaned[i]
+            short = (cum_dists[i+1] - cum_dists[i]) < SHORT_SEG_M
+            if (abs(seg_center - center) <= CLUSTER_GAP_M
+                    and abs(grade) >= NEAR_BAD_THRESHOLD
+                    and (short or abs(dz) >= NEAR_ELEVATION_JUMP_M)):
+                near_segs.add(i)
+                if i not in seg_type:
+                    seg_type[i] = "近傍"
 
-    return points, point_attr
+    # --- フェーズ3: クラスタリング ---
+    raw_clusters = _cluster_segments(sorted(near_segs), cum_dists, CLUSTER_GAP_M)
+
+    def is_anchor_candidate(i):
+        if i <= 0 or i >= n-1 or cleaned[i] is None:
+            return False
+        pg, ng = grades[i-1], grades[i]
+        if pg is None or ng is None:
+            return False
+        if abs(pg) > ANCHOR_GRADE_LIMIT or abs(ng) > ANCHOR_GRADE_LIMIT:
+            return False
+        m = _local_median_elevation(i, cum_dists, cleaned, MEDIAN_WINDOW_M)
+        return m is not None and abs(cleaned[i] - m) <= ANCHOR_MEDIAN_DEV_M
+
+    def find_anchor(start_i, direction):
+        start_dist = cum_dists[start_i]
+        i = start_i
+        run = []
+        while 0 < i < n-1 and abs(cum_dists[i] - start_dist) <= MAX_ANCHOR_SEARCH_M:
+            if is_anchor_candidate(i):
+                run.append(i)
+                if len(run) >= 2:
+                    return run[0]
+            else:
+                run = []
+            i += direction
+        return None
+
+    def is_left_boundary_anchor(i):
+        return (0 < i < n-1 and cleaned[i] is not None
+                and grades[i-1] is not None and abs(grades[i-1]) <= BOUNDARY_GRADE_LIMIT)
+
+    def is_right_boundary_anchor(i):
+        return (0 < i < n-1 and cleaned[i] is not None
+                and grades[i] is not None and abs(grades[i]) <= BOUNDARY_GRADE_LIMIT)
+
+    # --- フェーズ4: アンカー選定 + 修復範囲 ---
+    repair_ranges = []
+    for cluster in raw_clusters:
+        start_pt = cluster["start_seg"]
+        end_pt   = cluster["end_seg"] + 1
+        la = (start_pt if (is_left_boundary_anchor(start_pt) and is_anchor_candidate(start_pt))
+              else find_anchor(start_pt - 1, -1))
+        ra = (end_pt if (is_right_boundary_anchor(end_pt) and is_anchor_candidate(end_pt))
+              else find_anchor(end_pt + 1, 1))
+
+        skip_reason = None
+        net_grade   = None
+        if la is None or ra is None or la >= ra:
+            skip_reason = "アンカー見つからず"
+        else:
+            dist_m = cum_dists[ra] - cum_dists[la]
+            if dist_m > 0 and cleaned[la] is not None and cleaned[ra] is not None:
+                net_grade = (cleaned[ra] - cleaned[la]) / dist_m * 100
+                if abs(net_grade) > MAX_ANCHOR_GRADE:
+                    skip_reason = f"正味勾配過大 ({net_grade:+.2f}%)"
+
+        repair_ranges.append({
+            "cluster":     cluster,
+            "left":        la,
+            "right":       ra,
+            "net_grade":   net_grade,
+            "skip_reason": skip_reason,
+        })
+
+    # --- フェーズ5: 修復範囲マージ ---
+    valid = [r for r in repair_ranges if r["skip_reason"] is None and r["left"] is not None]
+    valid.sort(key=lambda r: r["left"])
+    merged = []
+    if valid:
+        merged = [dict(valid[0])]
+        for r in valid[1:]:
+            prev    = merged[-1]
+            gap_m   = cum_dists[r["left"]] - cum_dists[prev["right"]]
+            if r["left"] <= prev["right"] or gap_m <= MERGE_GAP_M:
+                prev["right"] = max(prev["right"], r["right"])
+            else:
+                merged.append(dict(r))
+
+    # seg→クラスタID 逆引き
+    seg_to_cl = {}
+    for ci, r in enumerate(repair_ranges):
+        for si in range(r["cluster"]["start_seg"], r["cluster"]["end_seg"] + 1):
+            seg_to_cl[si] = ci
+
+    return {
+        "cum_dists":     cum_dists,
+        "grades":        grades,
+        "bad_segs":      set(bad_segs),
+        "near_segs":     near_segs,
+        "seg_type":      seg_type,
+        "repair_ranges": repair_ranges,
+        "merged":        merged,
+        "seg_to_cl":     seg_to_cl,
+    }
+
+
+def _fmt_grade(g):
+    if g is None:
+        return "    -   "
+    return f"{g:+8.2f}%"
+
+def _fmt_ele(e):
+    if e is None:
+        return "    -  "
+    return f"{e:7.1f}"
+
+def _fmt_dist(d):
+    if d is None or d < 0.01:
+        return "      -  "
+    return f"{d:8.1f}m"
+
+
+def write_compare(path, input_path, output_path, points, elevs_before, elevs_after,
+                  stats, analysis, threshold, gap):
+    n = len(points)
+    cum   = analysis["cum_dists"]
+    gb    = analysis["grades"]
+    ga    = _elevation_grades(points, elevs_after, cum)
+    bad   = analysis["bad_segs"]
+    near  = analysis["near_segs"]
+    stype = analysis["seg_type"]
+    rrs   = analysis["repair_ranges"]
+    seg2cl= analysis["seg_to_cl"]
+
+    # アンカーポイントの逆引き (pt_idx -> list of "左:C{n}" or "右:C{n}")
+    pt_anchor = {}
+    for ci, r in enumerate(rrs):
+        if r["skip_reason"]:
+            continue
+        la, ra = r["left"], r["right"]
+        if la is not None:
+            pt_anchor.setdefault(la, []).append(f"左アンカー:C{ci+1}")
+        if ra is not None:
+            pt_anchor.setdefault(ra, []).append(f"右アンカー:C{ci+1}")
+
+    corrected = set()
+    for i in range(n):
+        if elevs_before[i] != elevs_after[i] and elevs_after[i] is not None:
+            corrected.add(i)
+
+    SEP  = "=" * 78
+    SEP2 = "-" * 78
+
+    with open(path, "w", encoding="utf-8") as f:
+        def w(s=""):
+            f.write(s + "\n")
+
+        w(SEP)
+        w("  スパイク補正レポート")
+        w(f"  実行日時  : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        w(f"  入力      : {input_path}")
+        w(f"  出力      : {output_path}")
+        w(f"  総点数    : {n}")
+        w(f"  閾値設定  : 勾配閾値={threshold}%  クラスタ距離={gap}m")
+        w(SEP)
+
+        w()
+        w("【結果サマリー】")
+        w(f"  補正前 最大勾配  : {stats['max_grade_before']:+.2f}%")
+        w(f"  補正後 最大勾配  : {stats['max_grade_after']:+.2f}%")
+        w(f"  補正クラスタ数   : {stats['clusters']}")
+        w(f"  補正点数         : {stats['points']}")
+
+        w()
+        w("【バッドセグメント一覧】")
+        if not bad:
+            w("  (なし)")
+        else:
+            w(f"  {'seg':>4}  {'pt始→終':^11}  {'距離':>7}  {'高低差':>7}  {'勾配':>9}  分類")
+            w(f"  {'-'*4}  {'-'*11}  {'-'*7}  {'-'*7}  {'-'*9}  {'-'*20}")
+            for i in sorted(bad):
+                if elevs_before[i] is None or elevs_before[i+1] is None:
+                    continue
+                d  = cum[i+1] - cum[i]
+                dz = elevs_before[i+1] - elevs_before[i]
+                g  = gb[i]
+                w(f"  {i:>4}  pt{i:>4}→{i+1:<4}  {d:>6.1f}m  {dz:>+7.1f}m  {g:>+8.2f}%  {stype.get(i,'')}")
+
+        w()
+        w("【クラスタ・修復範囲】")
+        if not rrs:
+            w("  (クラスタなし)")
+        for ci, r in enumerate(rrs):
+            cl  = r["cluster"]
+            la  = r["left"]
+            ra  = r["right"]
+            ng  = r["net_grade"]
+            skp = r["skip_reason"]
+            w(f"  クラスタ {ci+1}:")
+            w(f"    バッドセグメント区間 : seg {cl['start_seg']} → {cl['end_seg']}"
+              f"  (pt{cl['start_seg']} → pt{cl['end_seg']+1})")
+            if skp:
+                w(f"    修復                : スキップ ({skp})")
+                if la is not None:
+                    w(f"    左アンカー          : pt{la}  ele={_fmt_ele(elevs_before[la]).strip()}")
+                else:
+                    w(f"    左アンカー          : 見つからず")
+                if ra is not None:
+                    w(f"    右アンカー          : pt{ra}  ele={_fmt_ele(elevs_before[ra]).strip()}")
+                else:
+                    w(f"    右アンカー          : 見つからず")
+            else:
+                dist_m = cum[ra] - cum[la]
+                w(f"    左アンカー          : pt{la}  ele={_fmt_ele(elevs_before[la]).strip()}")
+                w(f"    右アンカー          : pt{ra}  ele={_fmt_ele(elevs_before[ra]).strip()}")
+                w(f"    アンカー間距離      : {dist_m:.1f}m")
+                w(f"    アンカー間正味勾配  : {ng:+.2f}%")
+                pts_fixed = [i for i in range(la+1, ra) if i in corrected]
+                w(f"    補正点              : {len(pts_fixed)}点  {pts_fixed}")
+
+        w()
+        w(SEP2)
+        w("【点別データ】")
+        w()
+        w("  凡例:")
+        w("    seg分類 : [ハード]=ハードスパイク  [ハード短]=ハードスパイク(短距離)")
+        w("             [通常]=通常スパイク        [通常短]=通常スパイク(短距離)")
+        w("             [近傍]=近傍セグメント      (空白)=正常")
+        w("    pt属性  : [LA:Cn]=クラスタnの左アンカー  [RA:Cn]=クラスタnの右アンカー")
+        w("             [補正]=標高値が変更された点")
+        w()
+
+        hdr = (f"  {'pt':>4}  {'前ele':>7}  {'後ele':>7}  {'変化':>6}  "
+               f"{'区間距離':>8}  {'前勾配':>9}  {'後勾配':>9}  "
+               f"{'seg分類':<18}  pt属性")
+        w(hdr)
+        w(f"  {'-'*4}  {'-'*7}  {'-'*7}  {'-'*6}  "
+          f"{'-'*8}  {'-'*9}  {'-'*9}  "
+          f"{'-'*18}  {'-'*20}")
+
+        for i in range(n):
+            eb   = elevs_before[i]
+            ea   = elevs_after[i]
+            delt = "" if (eb is None or ea is None) else f"{ea-eb:+.1f}"
+
+            # 次点との区間情報（最終点はなし）
+            if i < n - 1:
+                d    = cum[i+1] - cum[i]
+                d_s  = f"{d:8.1f}m"
+                gb_s = _fmt_grade(gb[i])
+                ga_s = _fmt_grade(ga[i])
+                # seg分類
+                if i in bad:
+                    t = stype.get(i, "")
+                    if "ハード" in t and "短距離" in t:
+                        scls = "[ハード短]"
+                    elif "ハード" in t:
+                        scls = "[ハード]  "
+                    elif "短距離" in t:
+                        scls = "[通常短]  "
+                    else:
+                        scls = "[通常]    "
+                elif i in near:
+                    scls = "[近傍]    "
+                else:
+                    scls = "          "
+                cl_tag = f" C{seg2cl[i]+1}" if i in seg2cl else ""
+                scls = (scls + cl_tag).ljust(18)
+            else:
+                d_s  = "         -"
+                gb_s = "         -"
+                ga_s = "         -"
+                scls = "".ljust(18)
+
+            # pt属性
+            flags = []
+            if i in pt_anchor:
+                flags.extend(pt_anchor[i])
+            if i in corrected:
+                flags.append("[補正]")
+            flags_s = "  ".join(flags)
+
+            w(f"  {i:>4}  {_fmt_ele(eb)}  {_fmt_ele(ea)}  {delt:>6}  "
+              f"{d_s}  {gb_s}  {ga_s}  "
+              f"{scls}  {flags_s}")
+
+        w()
+        w(SEP)
+        w("  レポート終了")
+        w(SEP)
+
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: python SpikeFixer.py [input.gpx] [output.gpx] [compare.txt]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="GPX標高スパイク補正ツール",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input",   help="補正前GPXファイル")
+    parser.add_argument("output",  help="補正後GPXファイル")
+    parser.add_argument("compare", help="比較テキストファイル")
+    parser.add_argument("--threshold", type=float, default=15.0,
+                        help="バッドセグメント判定の勾配閾値(%%) (デフォルト: 15.0)")
+    parser.add_argument("--gap",       type=float, default=250.0,
+                        help="クラスタ分割距離(m) (デフォルト: 250.0)")
+    args = parser.parse_args()
 
-    input_file = sys.argv[1]
-    output_file = sys.argv[2]
-    compare_file = sys.argv[3]
+    # --- 入力 ---
+    print(f"読み込み: {args.input}")
+    with open(args.input, encoding="utf-8") as f:
+        gpx = gpxpy.parse(f)
 
-    try:
-        tree = ET.parse(input_file)
-        root = tree.getroot()
-    except Exception as e:
-        print(f"Error parsing GPX: {e}")
-        sys.exit(1)
+    all_pts = [pt for tr in gpx.tracks for seg in tr.segments for pt in seg.points]
+    points       = [(pt.latitude, pt.longitude) for pt in all_pts]
+    elevs_before = [pt.elevation for pt in all_pts]
+    n = len(points)
+    print(f"  {n} 点")
 
-    # 名前空間の処理
-    ns = {'gpx': 'http://www.topografix.com/GPX/1/1'}
-    ET.register_namespace('', ns['gpx'])
+    # --- 補正 ---
+    print(f"スパイク補正中... (勾配閾値={args.threshold}%, クラスタ距離={args.gap}m)")
+    elevs_after, stats = clean_elevation_spikes(
+        points, elevs_before,
+        bad_grade_threshold=args.threshold,
+        cluster_gap_m=args.gap,
+    )
+    print(f"  補正前最大勾配: {stats['max_grade_before']:+.2f}%")
+    print(f"  補正後最大勾配: {stats['max_grade_after']:+.2f}%")
+    print(f"  クラスタ数: {stats['clusters']}  補正点数: {stats['points']}")
 
-    # 全トラックポイントをリスト化
-    points_data = []
-    xml_points = []
-    cumulative_dist = 0.0
-    last_pos = None
+    # --- 出力GPX ---
+    print(f"書き込み: {args.output}")
+    for i, pt in enumerate(all_pts):
+        pt.elevation = elevs_after[i]
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(gpx.to_xml())
 
-    for trkpt in root.findall('.//gpx:trkpt', ns):
-        lat = float(trkpt.get('lat'))
-        lon = float(trkpt.get('lon'))
-        ele_elem = trkpt.find('gpx:ele', ns)
-        ele = float(ele_elem.text) if ele_elem is not None else 0.0
-        
-        dist = 0.0
-        if last_pos:
-            dist = haversine_distance(last_pos[0], last_pos[1], lat, lon)
-        cumulative_dist += dist
-        
-        points_data.append({
-            'lat': lat, 'lon': lon, 'ele': ele, 
-            'dist': dist, 'cum_dist': cumulative_dist
-        })
-        xml_points.append(trkpt)
-        last_pos = (lat, lon)
+    # --- compare ---
+    print(f"レポート: {args.compare}")
+    analysis = _analyze_spikes(
+        points, elevs_before,
+        bad_grade_threshold=args.threshold,
+        cluster_gap_m=args.gap,
+    )
+    write_compare(
+        args.compare, args.input, args.output,
+        points, elevs_before, elevs_after,
+        stats, analysis, args.threshold, args.gap,
+    )
 
-    # スパイク補正実行
-    # points_data はミュータブルなので ele が書き換わる
-    original_eles = [p['ele'] for p in points_data]
-    corrected_points, attributes = clean_elevation_spikes(points_data)
+    print("完了")
 
-    # GPXツリーの更新
-    for i, trkpt in enumerate(xml_points):
-        ele_elem = trkpt.find('gpx:ele', ns)
-        if ele_elem is not None:
-            ele_elem.text = f"{corrected_points[i]['ele']:.2f}"
-        else:
-            new_ele = ET.SubElement(trkpt, '{http://www.topografix.com/GPX/1/1}ele')
-            new_ele.text = f"{corrected_points[i]['ele']:.2f}"
-
-    tree.write(output_file, encoding='utf-8', xml_declaration=True)
-
-    # 比較レポート (compare.txt) の生成
-    with open(compare_file, 'w', encoding='utf-8') as f:
-        f.write("========================================================================================\n")
-        f.write("  SpikeFixer Comparison Report\n")
-        f.write(f"  Processed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"  Input: {input_file}\n")
-        f.write("========================================================================================\n\n")
-        
-        header = (f"{'ID':>4} | {'Dist(m)':>8} | {'In-Ele':>8} | {'Out-Ele':>8} | {'Diff':>6} | "
-                  f"{'Grade%':>7} | {'Spike':>7} | {'Clust':>5} | {'Anchor':>6}\n")
-        f.write(header)
-        f.write("-" * len(header) + "\n")
-
-        for i in range(len(points_data)):
-            p = points_data[i]
-            attr = attributes[i]
-            orig_e = original_eles[i]
-            new_e = attr['new_ele']
-            e_diff = new_e - orig_e
-            
-            spike_str = attr['spike_type'] if attr['spike_type'] else ""
-            clust_str = str(attr['cluster_id']) if attr['cluster_id'] != -1 else ""
-            anchor_str = "YES" if attr['is_anchor'] else ""
-            
-            line = (f"{i:4d} | {p['cum_dist']:8.1f} | {orig_e:8.2f} | {new_e:8.2f} | {e_diff:6.2f} | "
-                    f"{attr['grade_prev']:7.1f} | {spike_str:7} | {clust_str:5} | {anchor_str:6}\n")
-            f.write(line)
-
-    print(f"Done.")
-    print(f"Output GPX: {output_file}")
-    print(f"Compare Report: {compare_file}")
 
 if __name__ == "__main__":
     main()

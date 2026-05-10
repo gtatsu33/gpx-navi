@@ -422,6 +422,7 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
     MEDIAN_WINDOW_M = 150.0
     ANCHOR_MEDIAN_DEV_M = 5.0
     MAX_ANCHOR_GRADE = 15.0
+    MIN_CORRECTION_GRADE_PCT = 1.0  # 隣接最短セグメントの1%未満の補正は無視（短距離セグメント対策）
 
     cleaned = list(elevations)
     cum_dists = _cumulative_distances(points)
@@ -561,7 +562,8 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
                 continue
             ratio = (cum_dists[i] - cum_dists[left]) / dist_m
             new_ele = cleaned[left] + (cleaned[right] - cleaned[left]) * ratio
-            if abs(cleaned[i] - new_ele) >= 0.5:
+            min_adj = min(cum_dists[i] - cum_dists[i - 1], cum_dists[i + 1] - cum_dists[i])
+            if abs(cleaned[i] - new_ele) >= MIN_CORRECTION_GRADE_PCT / 100 * min_adj:
                 cleaned[i] = round(new_ele, 1)
                 corrected_points.add(i)
 
