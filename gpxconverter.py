@@ -611,6 +611,12 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
 
 uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
 
+_oc1, _oc2, _oc3, _oc4 = st.columns(4)
+with _oc1: st.checkbox("マップマッチング", value=True, key="_opt_mm")
+with _oc2: st.checkbox("標高補正",         value=True, key="_opt_elev")
+with _oc3: st.checkbox("スパイク補正",      value=True, key="_opt_spike")
+with _oc4: st.checkbox("交差点名取得",      value=True, key="_opt_iname")
+
 if uploaded is None:
     _gkey_pre      = st.secrets.get("GOOGLE_ROADS_API_KEY", None)
     _plabels_pre   = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
@@ -670,7 +676,8 @@ _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 _needs_rerun = False
 
 if st.session_state.get("_mm_status") is None:
-    if _has_wpts and not st.session_state.pop("_force_mm", False):
+    _force_mm = st.session_state.pop("_force_mm", False)
+    if (_has_wpts and not _force_mm) or not st.session_state.get("_opt_mm", True):
         st.session_state["_matched_points"]         = list(points)
         st.session_state["_mm_status"]              = "スキップ"
     else:
@@ -778,8 +785,27 @@ active_points = st.session_state.get("_matched_points", points)
 
 # 標高補正 トリガー（初回 / 強制再処理）
 if st.session_state.get("_elev_status") is None:
-    if _has_wpts and not st.session_state.pop("_force_elev", False):
+    _force_elev = st.session_state.pop("_force_elev", False)
+    if _has_wpts and not _force_elev:
         st.session_state["_elev_status"] = "スキップ"
+    elif not st.session_state.get("_opt_elev", True):
+        if st.session_state.get("_opt_spike", True):
+            # 標高補正OFF + スパイク補正ON: 元GPX標高に対してスパイク補正のみ実行
+            _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
+                           for seg in tr.segments for p in seg.points]
+            _sc, _cs = clean_elevation_spikes(
+                active_points, _orig_elevs,
+                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
+                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
+            )
+            _nok = sum(1 for e in _sc if e is not None)
+            st.session_state["_elevations"]       = _sc
+            st.session_state["_elev_source"]      = "元データ（スパイク補正のみ）"
+            st.session_state["_elev_n_ok"]        = _nok
+            st.session_state["_elev_clean_stats"] = _cs
+            st.session_state["_elev_status"]      = "完了" if _nok > 0 else "スキップ"
+        else:
+            st.session_state["_elev_status"] = "スキップ"
     else:
         _esrc_i = st.session_state.get("_elev_src", "auto")
         _inj_i  = _is_in_japan(active_points[0][0], active_points[0][1]) if active_points else False
@@ -820,11 +846,14 @@ if st.session_state.get("_elev_status") == "running":
             st.rerun()
 
     def _finalize_elev(elevs, cancelled=False):
-        elevs, _cs = clean_elevation_spikes(
-            active_points, elevs,
-            bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
-            cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
-        )
+        if st.session_state.get("_opt_spike", True):
+            elevs, _cs = clean_elevation_spikes(
+                active_points, elevs,
+                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
+                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
+            )
+        else:
+            _cs = {"clusters": 0, "points": 0, "max_grade_before": 0.0, "max_grade_after": 0.0}
         _nok = sum(1 for e in elevs if e is not None)
         _fb  = st.session_state.get("_elev_fallback_info", "")
         _src = (_fb + "→" + _elabel if _fb else _elabel) + ("（キャンセル）" if cancelled else "")
@@ -963,13 +992,18 @@ if "edit_turns" not in st.session_state:
         _md  = st.session_state.get("_md",  100)
         _sm  = st.session_state.get("_sm",  1)
         raw_turns = detect_turns(active_points, min_turn_angle=_mta, min_dist=_md, smooth=_sm)
-        intersection_names = fetch_intersection_names(raw_turns)
+        if st.session_state.get("_opt_iname", True):
+            intersection_names = fetch_intersection_names(raw_turns)
+            st.session_state["_iname_status"]  = "完了"
+            st.session_state["_iname_n_found"] = len(intersection_names)
+        else:
+            intersection_names = {}
+            st.session_state["_iname_status"]  = "スキップ"
+            st.session_state["_iname_n_found"] = 0
         st.session_state["edit_turns"] = [
             with_name(t, intersection_names.get(t["index"]))
             for t in raw_turns
         ]
-        st.session_state["_iname_status"]  = "完了"
-        st.session_state["_iname_n_found"] = len(intersection_names)
 
 current_turns = st.session_state["edit_turns"]
 
