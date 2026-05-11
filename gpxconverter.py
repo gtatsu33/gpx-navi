@@ -838,10 +838,20 @@ if st.session_state.get("_elev_status") == "running":
     _ecol_prog, _ecol_btn = st.columns([5, 1])
     with _ecol_prog:
         _elev_prog_area = st.empty()
-        _elev_prog_area.progress(
-            _ebi / _en_batches,
-            text=f"⛰️ 標高補正中（{_elabel}）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
-        )
+        _pending_retry = st.session_state.get("_elev_retry_idxs")
+        if _pending_retry and _active_prov == "gsi":
+            _es_init = _ebi * _E_BATCH
+            _ee_init = min(_es_init + _E_BATCH, _en)
+            _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
+            _elev_prog_area.progress(
+                (_es_init + _n_confirmed) / _en,
+                text=f"⚠️ 国土地理院が遅いです（{len(_pending_retry)}点再試行中）… {_es_init + _n_confirmed}/{_en} 点確定",
+            )
+        else:
+            _elev_prog_area.progress(
+                _ebi / _en_batches,
+                text=f"⛰️ 標高補正中（{_elabel}）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
+            )
     with _ecol_btn:
         if st.button("⏹ キャンセル", key="elev_cancel_btn"):
             st.session_state["_elev_cancel_requested"] = True
@@ -864,7 +874,7 @@ if st.session_state.get("_elev_status") == "running":
         st.session_state["_elev_n_ok"]        = _nok
         st.session_state["_elev_clean_stats"] = _cs
         st.session_state["_elev_status"]      = "キャンセル" if cancelled else ("完了" if _nok > 0 else "エラー")
-        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_active_provider", "_elev_fallback_info"]:
+        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_active_provider", "_elev_fallback_info", "_elev_retry_idxs"]:
             st.session_state.pop(_ek, None)
 
     def _do_fallback(to_prov):
@@ -904,29 +914,38 @@ if st.session_state.get("_elev_status") == "running":
                     return _ei, val, False
                 except Exception:
                     return _ei, None, True  # timeout / HTTP error
-            _etasks   = [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+            # 再試行対象があればその点だけ、なければバッチ全点を投げる
+            _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
+            _is_retry   = _retry_idxs is not None
+            _etasks = (
+                [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
+                if _is_retry
+                else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+            )
             _edone    = [0]
-            _had_err  = False
+            _err_idxs = []
             with ThreadPoolExecutor(max_workers=10) as _eex:
                 for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
                     _ei2, _ev2, _err = _ef.result()
                     if _err:
-                        _had_err = True
+                        _err_idxs.append(_ei2)
                     else:
                         _ep[_ei2] = _ev2
                     _edone[0] += 1
-                    _pts_done = _es + _edone[0]
-                    _elev_prog_area.progress(
-                        _pts_done / _en,
-                        text=f"⛰️ 標高補正中（{_elabel}）… {_pts_done}/{_en} 点",
-                    )
-            if _had_err:
-                # 旧: _do_fallback("opentopodata") — 戻す場合は↑3行をこの1行に置換
-                _orig = [p.elevation for tr in gpx_parsed.tracks for seg in tr.segments for p in seg.points]
-                st.session_state["_elev_fallback_info"] = "国土地理院失敗"
-                _elabel = "元データ"
-                _finalize_elev(_orig)
-                _elev_prog_area.progress(1.0, text="⚠️ 国土地理院エラー - 元データを保持")
+                    if not _is_retry:
+                        _pts_done = _es + _edone[0]
+                        _elev_prog_area.progress(
+                            _pts_done / _en,
+                            text=f"⛰️ 標高補正中（{_elabel}）… {_pts_done}/{_en} 点",
+                        )
+            if _err_idxs:
+                # タイムアウト点が残っている → 同バッチ内で再試行
+                st.session_state["_elev_retry_idxs"] = _err_idxs
+                _n_confirmed = (_ee - _es) - len(_err_idxs)
+                _elev_prog_area.progress(
+                    (_es + _n_confirmed) / _en,
+                    text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
+                )
                 st.rerun()
 
         elif _active_prov == "opentopodata":
