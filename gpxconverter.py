@@ -921,8 +921,13 @@ if st.session_state.get("_elev_status") == "running":
                         text=f"⛰️ 標高補正中（{_elabel}）… {_pts_done}/{_en} 点",
                     )
             if _had_err:
-                _elev_prog_area.progress(0.0, text="⚠️ 国土地理院エラー → OpenTopoDataへ切り替え中…")
-                _do_fallback("opentopodata")  # st.rerun() して終了
+                # 旧: _do_fallback("opentopodata") — 戻す場合は↑3行をこの1行に置換
+                _orig = [p.elevation for tr in gpx_parsed.tracks for seg in tr.segments for p in seg.points]
+                st.session_state["_elev_fallback_info"] = "国土地理院失敗"
+                _elabel = "元データ"
+                _finalize_elev(_orig)
+                _elev_prog_area.progress(1.0, text="⚠️ 国土地理院エラー - 元データを保持")
+                st.rerun()
 
         elif _active_prov == "opentopodata":
             try:
