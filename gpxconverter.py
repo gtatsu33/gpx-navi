@@ -905,7 +905,7 @@ if st.session_state.get("_elev_status") == "running":
                     _er = _etls.session.get(
                         "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
                         params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
-                        timeout=5,
+                        timeout=10,
                     )
                     _er.raise_for_status()
                     _ev = _er.json().get("elevation")
@@ -922,8 +922,10 @@ if st.session_state.get("_elev_status") == "running":
                 if _is_retry
                 else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
             )
-            _edone    = [0]
-            _err_idxs = []
+            _edone      = [0]
+            _econfirmed = [0]   # 確定点数（成功 or None）のみカウント
+            _bar_prev   = [0]   # 最後にバー更新した時の確定点数
+            _err_idxs   = []
             with ThreadPoolExecutor(max_workers=10) as _eex:
                 for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
                     _ei2, _ev2, _err = _ef.result()
@@ -931,12 +933,14 @@ if st.session_state.get("_elev_status") == "running":
                         _err_idxs.append(_ei2)
                     else:
                         _ep[_ei2] = _ev2
+                        _econfirmed[0] += 1
                     _edone[0] += 1
-                    if not _is_retry:
-                        _pts_done = _es + _edone[0]
+                    if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
+                        _bar_prev[0] = _econfirmed[0]
+                        _pts_confirmed = _es + _econfirmed[0]
                         _elev_prog_area.progress(
-                            _pts_done / _en,
-                            text=f"⛰️ 標高補正中（{_elabel}）… {_pts_done}/{_en} 点",
+                            _pts_confirmed / _en,
+                            text=f"⛰️ 標高補正中（{_elabel}）… {_pts_confirmed}/{_en} 点",
                         )
             if _err_idxs:
                 # タイムアウト点が残っている → 同バッチ内で再試行
