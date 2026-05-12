@@ -2,7 +2,7 @@
 GPX ターン検出・強化ツール
 点X の前後の点 A,B のベアリング差でコーナーを検出する
 手動編集機能付き（追加・削除・名前変更）
-マップマッチング（Valhalla）・標高補正（国土地理院 / OpenTopoData / Open-Meteo）対応
+マップマッチング（Valhalla）・標高補正（国土地理院）対応
 交差点名取得（Overpass API / OSM直接）対応
 """
 
@@ -10,7 +10,6 @@ import streamlit as st
 import gpxpy
 import gpxpy.gpx
 import math
-import time
 import numpy as np
 import folium
 from streamlit_folium import st_folium
@@ -247,107 +246,6 @@ def _google_roads_match_chunk(chunk, api_key):
 def _is_in_japan(lat, lon):
     return 24.0 <= lat <= 46.0 and 122.0 <= lon <= 154.0
 
-def _fetch_gsi_elevation(lat, lon):
-    """国土地理院 標高API（1点）。取得失敗・海洋部(-9999)はNoneを返す"""
-    resp = requests.get(
-        "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
-        params={"lat": lat, "lon": lon, "outtype": "JSON"},
-        timeout=12,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    elev = data.get("elevation")
-    return None if (elev is None or elev == -9999) else float(elev)
-
-def _fetch_opentopodata_batch(batch):
-    """OpenTopoData SRTM30m elevation API（最大100点バッチ、パイプ区切り）"""
-    locs = "|".join(f"{lat},{lon}" for lat, lon in batch)
-    resp = requests.get(
-        "https://api.opentopodata.org/v1/srtm30m",
-        params={"locations": locs},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return [r.get("elevation") for r in resp.json().get("results", [])]
-
-def _fetch_openmeteo_batch(batch):
-    """Open-Meteo elevation API（最大100点バッチ）"""
-    resp = requests.get(
-        "https://api.open-meteo.com/v1/elevation",
-        params={
-            "latitude":  ",".join(f"{lat:.6f}" for lat, lon in batch),
-            "longitude": ",".join(f"{lon:.6f}" for lat, lon in batch),
-        },
-        timeout=20,
-    )
-    resp.raise_for_status()
-    return resp.json().get("elevation", [None] * len(batch))
-
-def fetch_all_elevations(points, source="auto"):
-    """
-    全trkptの標高を取得する。
-    source: "auto" | "gsi" | "openmeteo"
-    戻り値: (elevations: list[float|None], source_used: str, n_ok: int)
-    """
-    n          = len(points)
-    elevations = [None] * n
-    in_japan   = _is_in_japan(points[0][0], points[0][1]) if points else False
-    use_gsi    = (source == "gsi") or (source == "auto" and in_japan)
-    src_label  = "国土地理院" if use_gsi else "Open-Meteo"
-
-    prog = st.progress(0, text=f"標高データ取得中（{src_label}）…")
-
-    if use_gsi:
-        # 国土地理院: スレッドローカルSessionでTCP接続を再利用しながら並列リクエスト
-        _tls = threading.local()
-        done = [0]
-
-        def _fetch_one(args):
-            i, lat, lon = args
-            if not hasattr(_tls, "session"):
-                _tls.session = requests.Session()
-            try:
-                resp = _tls.session.get(
-                    "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
-                    params={"lat": lat, "lon": lon, "outtype": "JSON"},
-                    timeout=12,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                elev = data.get("elevation")
-                return i, (None if (elev is None or elev == -9999) else float(elev))
-            except Exception:
-                return i, None
-
-        tasks = [(i, lat, lon) for i, (lat, lon) in enumerate(points)]
-        with ThreadPoolExecutor(max_workers=10) as ex:
-            futures = {ex.submit(_fetch_one, t): t[0] for t in tasks}
-            for future in as_completed(futures):
-                i, elev = future.result()
-                elevations[i] = elev
-                done[0] += 1
-                if done[0] % 10 == 0 or done[0] == n:
-                    prog.progress(done[0] / n,
-                                  text=f"標高取得中（国土地理院）… {done[0]}/{n} 点")
-
-        # GSIで取れなかった点は元のGPX標高を保持（None のまま = build_enhanced_gpx が元値を使う）
-    else:
-        # Open-Meteo: バッチ処理（最大100点/リクエスト）
-        BATCH = 100
-        for b in range(0, n, BATCH):
-            batch = points[b:b + BATCH]
-            try:
-                batch_e = _fetch_openmeteo_batch(batch)
-                for j, elev in enumerate(batch_e):
-                    elevations[b + j] = elev
-            except Exception:
-                pass
-            prog.progress(min(b + BATCH, n) / n,
-                          text=f"標高取得中（Open-Meteo）… {min(b+BATCH, n)}/{n} 点")
-
-    prog.empty()
-    n_ok = sum(1 for e in elevations if e is not None)
-    return elevations, src_label, n_ok
 
 def _cumulative_distances(points):
     cum = [0.0]
@@ -808,38 +706,27 @@ if st.session_state.get("_elev_status") is None:
             st.session_state["_elev_status"]      = "完了" if _nok > 0 else "スキップ"
         else:
             st.session_state["_elev_status"] = "スキップ"
+    elif not (active_points and _is_in_japan(active_points[0][0], active_points[0][1])):
+        st.session_state["_elev_status"] = "海外スキップ"
     else:
-        _esrc_i = st.session_state.get("_elev_src", "auto")
-        _inj_i  = _is_in_japan(active_points[0][0], active_points[0][1]) if active_points else False
-        if (_esrc_i == "gsi") or (_esrc_i == "auto" and _inj_i):
-            _init_prov = "gsi"
-        elif _esrc_i == "openmeteo":
-            _init_prov = "openmeteo"
-        else:
-            _init_prov = "opentopodata"
-        st.session_state["_elev_status"]          = "running"
-        st.session_state["_elev_batch_idx"]       = 0
-        st.session_state["_elev_partial"]         = [None] * len(active_points)
-        st.session_state["_elev_active_provider"] = _init_prov
-        st.session_state.pop("_elev_fallback_info", None)
+        st.session_state["_elev_status"]    = "running"
+        st.session_state["_elev_batch_idx"] = 0
+        st.session_state["_elev_partial"]   = [None] * len(active_points)
         st.rerun()
 
 # 標高補正 実行ループ（1 rerun = 1 バッチ）
 if st.session_state.get("_elev_status") == "running":
-    _en          = len(active_points)
-    _active_prov = st.session_state.get("_elev_active_provider", "gsi")
-    _elabel_map  = {"gsi": "国土地理院", "opentopodata": "OpenTopoData", "openmeteo": "Open-Meteo"}
-    _elabel      = _elabel_map.get(_active_prov, "Open-Meteo")
-    _E_BATCH     = 50 if _active_prov == "gsi" else 100
-    _en_batches  = math.ceil(_en / _E_BATCH)
-    _ebi         = st.session_state.get("_elev_batch_idx", 0)
-    _ecancelled  = st.session_state.pop("_elev_cancel_requested", False)
+    _en         = len(active_points)
+    _E_BATCH    = 50
+    _en_batches = math.ceil(_en / _E_BATCH)
+    _ebi        = st.session_state.get("_elev_batch_idx", 0)
+    _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
 
     _ecol_prog, _ecol_btn = st.columns([5, 1])
     with _ecol_prog:
         _elev_prog_area = st.empty()
         _pending_retry = st.session_state.get("_elev_retry_idxs")
-        if _pending_retry and _active_prov == "gsi":
+        if _pending_retry:
             _es_init = _ebi * _E_BATCH
             _ee_init = min(_es_init + _E_BATCH, _en)
             _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
@@ -850,7 +737,7 @@ if st.session_state.get("_elev_status") == "running":
         else:
             _elev_prog_area.progress(
                 _ebi / _en_batches,
-                text=f"⛰️ 標高補正中（{_elabel}）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
+                text=f"⛰️ 標高補正中（国土地理院）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
             )
     with _ecol_btn:
         if st.button("⏹ キャンセル", key="elev_cancel_btn"):
@@ -867,23 +754,14 @@ if st.session_state.get("_elev_status") == "running":
         else:
             _cs = {"clusters": 0, "points": 0, "max_grade_before": 0.0, "max_grade_after": 0.0}
         _nok = sum(1 for e in elevs if e is not None)
-        _fb  = st.session_state.get("_elev_fallback_info", "")
-        _src = (_fb + "→" + _elabel if _fb else _elabel) + ("（キャンセル）" if cancelled else "")
+        _src = "国土地理院" + ("（キャンセル）" if cancelled else "")
         st.session_state["_elevations"]       = elevs
         st.session_state["_elev_source"]      = _src
         st.session_state["_elev_n_ok"]        = _nok
         st.session_state["_elev_clean_stats"] = _cs
         st.session_state["_elev_status"]      = "キャンセル" if cancelled else ("完了" if _nok > 0 else "エラー")
-        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_active_provider", "_elev_fallback_info", "_elev_retry_idxs"]:
+        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
             st.session_state.pop(_ek, None)
-
-    def _do_fallback(to_prov):
-        _fb = st.session_state.get("_elev_fallback_info", "")
-        st.session_state["_elev_fallback_info"]   = (_fb + "→" if _fb else "") + _elabel + "失敗"
-        st.session_state["_elev_active_provider"] = to_prov
-        st.session_state["_elev_batch_idx"]       = 0
-        st.session_state["_elev_partial"]         = [None] * _en
-        st.rerun()
 
     if _ecancelled:
         _ep = st.session_state.get("_elev_partial", [None] * _en)
@@ -895,90 +773,61 @@ if st.session_state.get("_elev_status") == "running":
         _ee = min(_es + _E_BATCH, _en)
         _ep = st.session_state.get("_elev_partial", [None] * _en)
 
-        if _active_prov == "gsi":
-            _etls = threading.local()
-            def _efetch(args):
-                _ei, _elat, _elon = args
-                if not hasattr(_etls, "session"):
-                    _etls.session = requests.Session()
-                try:
-                    _er = _etls.session.get(
-                        "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
-                        params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
-                        timeout=10,
+        _etls = threading.local()
+        def _efetch(args):
+            _ei, _elat, _elon = args
+            if not hasattr(_etls, "session"):
+                _etls.session = requests.Session()
+            try:
+                _er = _etls.session.get(
+                    "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
+                    params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
+                    timeout=10,
+                )
+                _er.raise_for_status()
+                _ev = _er.json().get("elevation")
+                # "-----" は海洋・範囲外（正常応答）→ None、エラーなし
+                val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
+                return _ei, val, False
+            except Exception:
+                return _ei, None, True  # timeout / HTTP error
+        # 再試行対象があればその点だけ、なければバッチ全点を投げる
+        _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
+        _is_retry   = _retry_idxs is not None
+        _etasks = (
+            [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
+            if _is_retry
+            else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+        )
+        _edone      = [0]
+        _econfirmed = [0]   # 確定点数（成功 or None）のみカウント
+        _bar_prev   = [0]   # 最後にバー更新した時の確定点数
+        _err_idxs   = []
+        with ThreadPoolExecutor(max_workers=10) as _eex:
+            for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
+                _ei2, _ev2, _err = _ef.result()
+                if _err:
+                    _err_idxs.append(_ei2)
+                else:
+                    _ep[_ei2] = _ev2
+                    _econfirmed[0] += 1
+                _edone[0] += 1
+                if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
+                    _bar_prev[0] = _econfirmed[0]
+                    _pts_confirmed = _es + _econfirmed[0]
+                    _elev_prog_area.progress(
+                        _pts_confirmed / _en,
+                        text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
                     )
-                    _er.raise_for_status()
-                    _ev = _er.json().get("elevation")
-                    # "-----" は海洋・範囲外（正常応答）→ None、エラーなし
-                    val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
-                    return _ei, val, False
-                except Exception:
-                    return _ei, None, True  # timeout / HTTP error
-            # 再試行対象があればその点だけ、なければバッチ全点を投げる
-            _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
-            _is_retry   = _retry_idxs is not None
-            _etasks = (
-                [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
-                if _is_retry
-                else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+        if _err_idxs:
+            # タイムアウト点が残っている → 同バッチ内で再試行
+            st.session_state["_elev_retry_idxs"] = _err_idxs
+            _n_confirmed = (_ee - _es) - len(_err_idxs)
+            _elev_prog_area.progress(
+                (_es + _n_confirmed) / _en,
+                text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
             )
-            _edone      = [0]
-            _econfirmed = [0]   # 確定点数（成功 or None）のみカウント
-            _bar_prev   = [0]   # 最後にバー更新した時の確定点数
-            _err_idxs   = []
-            with ThreadPoolExecutor(max_workers=10) as _eex:
-                for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
-                    _ei2, _ev2, _err = _ef.result()
-                    if _err:
-                        _err_idxs.append(_ei2)
-                    else:
-                        _ep[_ei2] = _ev2
-                        _econfirmed[0] += 1
-                    _edone[0] += 1
-                    if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
-                        _bar_prev[0] = _econfirmed[0]
-                        _pts_confirmed = _es + _econfirmed[0]
-                        _elev_prog_area.progress(
-                            _pts_confirmed / _en,
-                            text=f"⛰️ 標高補正中（{_elabel}）… {_pts_confirmed}/{_en} 点",
-                        )
-            if _err_idxs:
-                # タイムアウト点が残っている → 同バッチ内で再試行
-                st.session_state["_elev_retry_idxs"] = _err_idxs
-                _n_confirmed = (_ee - _es) - len(_err_idxs)
-                _elev_prog_area.progress(
-                    (_es + _n_confirmed) / _en,
-                    text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
-                )
-                st.rerun()
-
-        elif _active_prov == "opentopodata":
-            try:
-                _ebe = _fetch_opentopodata_batch(active_points[_es:_ee])
-                for _ej, _ev3 in enumerate(_ebe):
-                    _ep[_es + _ej] = _ev3
-                _elev_prog_area.progress(
-                    _ee / _en,
-                    text=f"⛰️ 標高補正中（{_elabel}）… {_ee}/{_en} 点",
-                )
-            except Exception:
-                _elev_prog_area.progress(0.0, text="⚠️ OpenTopoDataエラー → Open-Meteoへ切り替え中…")
-                _do_fallback("openmeteo")  # st.rerun() して終了
-
-        else:  # openmeteo
-            try:
-                _ebe = _fetch_openmeteo_batch(active_points[_es:_ee])
-                for _ej, _ev3 in enumerate(_ebe):
-                    _ep[_es + _ej] = _ev3
-                _elev_prog_area.progress(
-                    _ee / _en,
-                    text=f"⛰️ 標高補正中（{_elabel}）… {_ee}/{_en} 点",
-                )
-            except Exception:
-                # 全プロバイダ失敗 → 元データを保持（全点 None）
-                _finalize_elev([None] * _en)
-                _elev_prog_area.progress(1.0, text="⚠️ 全プロバイダ失敗 - 元データを保持")
-                st.rerun()
+            st.rerun()
 
         st.session_state["_elev_partial"] = _ep
 
@@ -988,8 +837,6 @@ if st.session_state.get("_elev_status") == "running":
             _needs_rerun = True
         else:
             st.session_state["_elev_batch_idx"] = _ebi + 1
-            if _active_prov == "opentopodata":
-                time.sleep(1.0)  # レート制限: 1 req/sec
             st.rerun()
 
 if _needs_rerun:
@@ -1211,18 +1058,9 @@ if mm_status is not None:
 # サイドバー ─ 標高補正
 # ─────────────────────────────────────────────
 
-_ELEV_SOURCES = {
-    "自動（日本→国土地理院、海外→OpenTopoData）": "auto",
-    "国土地理院（日本専用・高精度）":              "gsi",
-    "Open-Meteo（全世界・低精度）":              "openmeteo",
-}
-_elev_labels = list(_ELEV_SOURCES.keys())
-_elev_codes  = list(_ELEV_SOURCES.values())
-_cur_src     = st.session_state.get("_elev_src", "auto")
-_cur_src_idx = _elev_codes.index(_cur_src) if _cur_src in _elev_codes else 0
-
 st.sidebar.divider()
 st.sidebar.header("⛰️ 標高補正")
+st.sidebar.caption("データソース: 国土地理院（日本専用）")
 
 elev_status = st.session_state.get("_elev_status")
 if elev_status == "完了":
@@ -1255,16 +1093,12 @@ elif elev_status == "キャンセル":
         st.sidebar.caption("スパイク除去: 補正対象なし")
 elif elev_status == "エラー":
     st.sidebar.warning("⚠️ 一部取得失敗")
+elif elev_status == "海外スキップ":
+    st.sidebar.info("⏭️ スキップ（海外ルート - 元の標高を保持）")
 elif elev_status == "スキップ":
     st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
 else:
     st.sidebar.info("⏳ 処理中…")
-
-in_japan_hint = _is_in_japan(active_points[0][0], active_points[0][1])
-st.sidebar.caption(f"ルート判定: {'🇯🇵 日本' if in_japan_hint else '🌍 海外'}")
-
-_sel_src = st.sidebar.selectbox("データソース", _elev_labels, index=_cur_src_idx)
-st.session_state["_elev_src"] = _ELEV_SOURCES[_sel_src]
 
 _elev_bad_grade = st.sidebar.slider(
     "スパイク判定 勾配閾値（%）", 5, 25, int(st.session_state.get("_elev_bad_grade", 15)), 1,
