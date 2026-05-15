@@ -513,7 +513,7 @@ uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"]
 
 _oc1, _oc2, _oc3, _oc4 = st.columns(4)
 with _oc1: st.checkbox("マップマッチング", value=True, key="_opt_mm")
-with _oc2: st.checkbox("標高補正",         value=True, key="_opt_elev")
+with _oc2: st.checkbox("標高補正",         value=False, key="_opt_elev")
 with _oc3: st.checkbox("スパイク補正",      value=True, key="_opt_spike")
 with _oc4: st.checkbox("交差点名取得",      value=True, key="_opt_iname")
 
@@ -561,6 +561,7 @@ _STATE_KEYS = [
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
     "_elevations",    "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
     "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
+    "_show_elev_prompt", "_noise_prompt_done",
     "_iname_status",  "_iname_n_found",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
@@ -842,6 +843,41 @@ if st.session_state.get("_elev_status") == "running":
 if _needs_rerun:
     st.rerun()
 
+# 標高補正後の残り勾配チェック → ノイズダイアログ
+@st.dialog("⛰️ 標高データについて")
+def _elev_noise_dialog():
+    _cur_on = st.session_state.get("_opt_elev", False)
+    if _cur_on:
+        st.warning("補正後もノイズが残っています。元のGPX標高データに戻しますか？")
+    else:
+        st.warning("標高データにノイズがあるようです。国土地理院の標高補正を行いますか？")
+    _dc1, _dc2 = st.columns(2)
+    with _dc1:
+        if st.button("✅ はい", use_container_width=True):
+            st.session_state["_opt_elev"] = not _cur_on
+            for _dk in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok",
+                        "_elev_clean_stats", "_elev_batch_idx", "_elev_partial",
+                        "_elev_cancel_requested", "_show_elev_prompt", "_noise_prompt_done"]:
+                st.session_state.pop(_dk, None)
+            st.session_state["_force_elev"] = True
+            st.rerun()
+    with _dc2:
+        if st.button("❌ いいえ", use_container_width=True):
+            st.session_state["_noise_prompt_done"] = True
+            st.session_state.pop("_show_elev_prompt", None)
+            st.rerun()
+
+if (
+    st.session_state.get("_elev_status") == "完了"
+    and not st.session_state.get("_noise_prompt_done")
+):
+    _cs_noise = st.session_state.get("_elev_clean_stats", {})
+    if _cs_noise.get("max_grade_after", 0.0) > st.session_state.get("_elev_bad_grade", 15.0):
+        st.session_state["_show_elev_prompt"] = True
+
+if st.session_state.get("_show_elev_prompt"):
+    _elev_noise_dialog()
+
 # ─── ターン初期化（初回のみ）──────────────────
 if "edit_turns" not in st.session_state:
     if _has_wpts:
@@ -1114,7 +1150,8 @@ if elev_status is not None:
     st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
     if st.sidebar.button("🔄 再処理", key="elev_reset"):
         for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
-                  "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested"]:
+                  "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
+                  "_show_elev_prompt", "_noise_prompt_done"]:
             st.session_state.pop(k, None)
         st.session_state["_force_elev"]           = True
         st.session_state["_skip_map_center_save"] = True
