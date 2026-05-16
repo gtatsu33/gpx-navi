@@ -189,25 +189,18 @@ def fetch_intersection_names(turns, radius=20):
     return result
 
 # ─────────────────────────────────────────────
-# マップマッチング（Valhalla）
-# OSM公式インスタンス。自転車・徒歩・車すべて1サーバーで対応。
+# マップマッチング（Valhalla / OSM公式インスタンス・自転車固定）
 # ─────────────────────────────────────────────
 
 _VALHALLA_URL = "https://valhalla1.openstreetmap.de/trace_attributes"
 
-_VALHALLA_COSTING = {
-    "cycling": "bicycle",
-    "foot":    "pedestrian",
-    "driving": "auto",
-}
-
-def _valhalla_match_chunk(chunk, costing, search_radius):
-    """Valhalla trace_attributes で1チャンクをスナップ"""
+def _valhalla_match_chunk(chunk, search_radius=50):
+    """Valhalla trace_attributes で1チャンクをスナップ（bicycle固定）"""
     resp = requests.post(
         _VALHALLA_URL,
         json={
             "shape":         [{"lat": lat, "lon": lon} for lat, lon in chunk],
-            "costing":       costing,
+            "costing":       "bicycle",
             "shape_match":   "map_snap",
             "search_radius": search_radius,
             "filters": {
@@ -215,24 +208,6 @@ def _valhalla_match_chunk(chunk, costing, search_radius):
                 "action":     "include",
             },
         },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-# ─────────────────────────────────────────────
-# マップマッチング（Google Maps Roads API）
-# ─────────────────────────────────────────────
-
-_GOOGLE_ROADS_URL = "https://roads.googleapis.com/v1/snapToRoads"
-
-def _google_roads_match_chunk(chunk, api_key):
-    """Google Roads API snapToRoads で1チャンクをスナップ（最大100点）"""
-    path = "|".join(f"{lat},{lon}" for lat, lon in chunk)
-    resp = requests.get(
-        _GOOGLE_ROADS_URL,
-        params={"path": path, "interpolate": "false", "key": api_key},
         timeout=30,
     )
     resp.raise_for_status()
@@ -474,6 +449,17 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
         "max_grade_after": max_grade_after,
     }
 
+def compute_grade_stats(points, elevations):
+    """勾配リストから上り最大・下り最大（符号付き）を返す。データなしは None。"""
+    grades = _elevation_grades(points, elevations)
+    valid = [g for g in grades if g is not None]
+    if not valid:
+        return None
+    return {
+        "max": max((g for g in valid if g > 0), default=0.0),
+        "min": min((g for g in valid if g < 0), default=0.0),
+    }
+
 # ─────────────────────────────────────────────
 # GPX ビルダー（マッチング・標高補正対応）
 # ─────────────────────────────────────────────
@@ -511,26 +497,7 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
 
 uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
 
-_oc1, _oc2, _oc3, _oc4 = st.columns(4)
-with _oc1: st.checkbox("マップマッチング", value=True, key="_opt_mm")
-with _oc2: st.checkbox("標高補正",         value=False, key="_opt_elev")
-with _oc3: st.checkbox("スパイク補正",      value=True, key="_opt_spike")
-with _oc4: st.checkbox("交差点名取得",      value=True, key="_opt_iname")
-
 if uploaded is None:
-    _gkey_pre      = st.secrets.get("GOOGLE_ROADS_API_KEY", None)
-    _plabels_pre   = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
-    _pprov_pre     = st.session_state.get("_mm_provider", "valhalla")
-    _pidx_pre      = 1 if _pprov_pre == "google" else 0
-    if _gkey_pre and _is_admin:
-        _sel_pre = st.radio(
-            "🗺️ マップマッチング プロバイダ",
-            _plabels_pre, index=_pidx_pre, horizontal=True,
-        )
-        st.session_state["_mm_provider"] = "google" if _sel_pre == _plabels_pre[1] else "valhalla"
-    else:
-        st.session_state["_mm_provider"] = "valhalla"
-        st.caption("マップマッチング: Valhalla（OSM公開API）")
     st.info("GPXファイルをアップロードしてください（Stravaなどのルートエクスポートが対象）")
     st.stop()
 
@@ -559,9 +526,9 @@ _STATE_KEYS = [
     "_map_center", "_map_zoom",
     "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
-    "_elevations",    "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
+    "_proc_status",
+    "_trkpt_org_elevs", "_trkpt_fix_elevs", "_grade_org", "_grade_fix", "_elev_choice",
     "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
-    "_show_elev_prompt", "_noise_prompt_done",
     "_iname_status",  "_iname_n_found",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
@@ -577,10 +544,9 @@ _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 _needs_rerun = False
 
 if st.session_state.get("_mm_status") is None:
-    _force_mm = st.session_state.pop("_force_mm", False)
-    if (_has_wpts and not _force_mm) or not st.session_state.get("_opt_mm", True):
-        st.session_state["_matched_points"]         = list(points)
-        st.session_state["_mm_status"]              = "スキップ"
+    if _has_wpts:
+        st.session_state["_matched_points"] = list(points)
+        st.session_state["_mm_status"]      = "スキップ"
     else:
         st.session_state["_mm_status"]              = "running"
         st.session_state["_mm_chunk_idx"]           = 0
@@ -589,14 +555,10 @@ if st.session_state.get("_mm_status") is None:
         st.session_state["_mm_errors_partial"]      = []
 
 if st.session_state.get("_mm_status") == "running":
-    _cur_provider = st.session_state.get("_mm_provider", "valhalla")
-    _MM_CHUNK   = 100 if _cur_provider == "google" else 50
-    _profile    = st.session_state.get("_mm_profile", "cycling")
-    _radius     = st.session_state.get("_mm_radius", 50)
-    _costing    = _VALHALLA_COSTING.get(_profile, "bicycle")
-    _ci         = st.session_state["_mm_chunk_idx"]
-    _n_chunks   = math.ceil(len(points) / _MM_CHUNK)
-    _cancelled  = st.session_state.pop("_mm_cancel_requested", False)
+    _MM_CHUNK  = 50
+    _ci        = st.session_state["_mm_chunk_idx"]
+    _n_chunks  = math.ceil(len(points) / _MM_CHUNK)
+    _cancelled = st.session_state.pop("_mm_cancel_requested", False)
 
     _col_prog, _col_btn = st.columns([5, 1])
     with _col_prog:
@@ -628,21 +590,11 @@ if st.session_state.get("_mm_status") == "running":
 
         try:
             _mp_list = st.session_state["_mm_matched_partial"]
-            if _cur_provider == "google":
-                _gkey = st.secrets.get("GOOGLE_ROADS_API_KEY", "")
-                _data = _google_roads_match_chunk(points[_s:_e], _gkey)
-                for _sp in _data.get("snappedPoints", []):
-                    _orig = _sp.get("originalIndex")
-                    if _orig is not None and _s + _orig < len(_mp_list):
-                        _loc = _sp["location"]
-                        _mp_list[_s + _orig] = (_loc["latitude"], _loc["longitude"])
-                        st.session_state["_mm_n_snapped_partial"] += 1
-            else:
-                _data = _valhalla_match_chunk(points[_s:_e], _costing, _radius)
-                for _j, _mp in enumerate(_data.get("matched_points", [])):
-                    if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
-                        _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
-                        st.session_state["_mm_n_snapped_partial"] += 1
+            _data = _valhalla_match_chunk(points[_s:_e])
+            for _j, _mp in enumerate(_data.get("matched_points", [])):
+                if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
+                    _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
+                    st.session_state["_mm_n_snapped_partial"] += 1
         except requests.exceptions.Timeout:
             if _ci == 0:
                 _auto_cancel = True
@@ -669,7 +621,6 @@ if st.session_state.get("_mm_status") == "running":
             st.session_state["_mm_status"]      = "完了" if _n_sn > 0 else "エラー"
             for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
                 st.session_state.pop(_k, None)
-            # edit_turns 座標同期をここで完了させ、即 rerun でキャンセルボタンを非表示にする
             _active_mm = st.session_state["_matched_points"]
             if "edit_turns" in st.session_state:
                 for _t in st.session_state["edit_turns"]:
@@ -684,39 +635,45 @@ if st.session_state.get("_mm_status") == "running":
 
 active_points = st.session_state.get("_matched_points", points)
 
-# 標高補正 トリガー（初回 / 強制再処理）
-if st.session_state.get("_elev_status") is None:
-    _force_elev = st.session_state.pop("_force_elev", False)
-    if _has_wpts and not _force_elev:
-        st.session_state["_elev_status"] = "スキップ"
-    elif not st.session_state.get("_opt_elev", True):
-        if st.session_state.get("_opt_spike", True):
-            # 標高補正OFF + スパイク補正ON: 元GPX標高に対してスパイク補正のみ実行
-            _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
-                           for seg in tr.segments for p in seg.points]
-            _sc, _cs = clean_elevation_spikes(
-                active_points, _orig_elevs,
-                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
-                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
-            )
-            _nok = sum(1 for e in _sc if e is not None)
-            st.session_state["_elevations"]       = _sc
-            st.session_state["_elev_source"]      = "元データ（スパイク補正のみ）"
-            st.session_state["_elev_n_ok"]        = _nok
-            st.session_state["_elev_clean_stats"] = _cs
-            st.session_state["_elev_status"]      = "完了" if _nok > 0 else "スキップ"
-        else:
-            st.session_state["_elev_status"] = "スキップ"
-    elif not (active_points and _is_in_japan(active_points[0][0], active_points[0][1])):
-        st.session_state["_elev_status"] = "海外スキップ"
+# ─────────────────────────────────────────────
+# 標高処理（org: 元GPX＋スパイク補正 / fix: GSI＋スパイク補正）
+# ─────────────────────────────────────────────
+
+def _set_default_elev_choice():
+    if "_elev_choice" in st.session_state:
+        return
+    _go = st.session_state.get("_grade_org")
+    _gf = st.session_state.get("_grade_fix")
+    _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+    _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
+    st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
+
+if st.session_state.get("_proc_status") is None:
+    # trkpt_org: 元GPX ele値 + スパイク補正
+    _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
+                   for seg in tr.segments for p in seg.points]
+    if all(e is None for e in _orig_elevs):
+        st.session_state["_trkpt_org_elevs"] = None
+        st.session_state["_grade_org"]       = None
     else:
-        st.session_state["_elev_status"]    = "running"
+        _org_cleaned, _ = clean_elevation_spikes(active_points, _orig_elevs)
+        st.session_state["_trkpt_org_elevs"] = _org_cleaned
+        st.session_state["_grade_org"]       = compute_grade_stats(active_points, _org_cleaned)
+
+    # trkpt_fix: GSI標高取得 → スパイク補正
+    if _has_wpts or not (active_points and _is_in_japan(active_points[0][0], active_points[0][1])):
+        st.session_state["_trkpt_fix_elevs"] = None
+        st.session_state["_grade_fix"]       = None
+        st.session_state["_proc_status"]     = "done"
+        _set_default_elev_choice()
+    else:
+        st.session_state["_proc_status"]    = "running_fix"
         st.session_state["_elev_batch_idx"] = 0
         st.session_state["_elev_partial"]   = [None] * len(active_points)
         st.rerun()
 
-# 標高補正 実行ループ（1 rerun = 1 バッチ）
-if st.session_state.get("_elev_status") == "running":
+# GSI標高取得ループ（1 rerun = 1 バッチ）
+if st.session_state.get("_proc_status") == "running_fix":
     _en         = len(active_points)
     _E_BATCH    = 50
     _en_batches = math.ceil(_en / _E_BATCH)
@@ -745,28 +702,22 @@ if st.session_state.get("_elev_status") == "running":
             st.session_state["_elev_cancel_requested"] = True
             st.rerun()
 
-    def _finalize_elev(elevs, cancelled=False):
-        if st.session_state.get("_opt_spike", True):
-            elevs, _cs = clean_elevation_spikes(
-                active_points, elevs,
-                bad_grade_threshold=st.session_state.get("_elev_bad_grade", 15.0),
-                cluster_gap_m=st.session_state.get("_elev_cluster_gap", 250.0),
-            )
+    def _finalize_fix(gsi_elevs, cancelled=False):
+        if cancelled:
+            st.session_state["_trkpt_fix_elevs"] = None
+            st.session_state["_grade_fix"]       = None
         else:
-            _cs = {"clusters": 0, "points": 0, "max_grade_before": 0.0, "max_grade_after": 0.0}
-        _nok = sum(1 for e in elevs if e is not None)
-        _src = "国土地理院" + ("（キャンセル）" if cancelled else "")
-        st.session_state["_elevations"]       = elevs
-        st.session_state["_elev_source"]      = _src
-        st.session_state["_elev_n_ok"]        = _nok
-        st.session_state["_elev_clean_stats"] = _cs
-        st.session_state["_elev_status"]      = "キャンセル" if cancelled else ("完了" if _nok > 0 else "エラー")
+            _fix_cleaned, _ = clean_elevation_spikes(active_points, gsi_elevs)
+            st.session_state["_trkpt_fix_elevs"] = _fix_cleaned
+            st.session_state["_grade_fix"]       = compute_grade_stats(active_points, _fix_cleaned)
         for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
             st.session_state.pop(_ek, None)
+        st.session_state["_proc_status"] = "done"
+        _set_default_elev_choice()
 
     if _ecancelled:
         _ep = st.session_state.get("_elev_partial", [None] * _en)
-        _finalize_elev(_ep, cancelled=True)
+        _finalize_fix(_ep, cancelled=True)
         _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
         _needs_rerun = True
     else:
@@ -787,12 +738,10 @@ if st.session_state.get("_elev_status") == "running":
                 )
                 _er.raise_for_status()
                 _ev = _er.json().get("elevation")
-                # "-----" は海洋・範囲外（正常応答）→ None、エラーなし
                 val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
                 return _ei, val, False
             except Exception:
-                return _ei, None, True  # timeout / HTTP error
-        # 再試行対象があればその点だけ、なければバッチ全点を投げる
+                return _ei, None, True
         _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
         _is_retry   = _retry_idxs is not None
         _etasks = (
@@ -801,8 +750,8 @@ if st.session_state.get("_elev_status") == "running":
             else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
         )
         _edone      = [0]
-        _econfirmed = [0]   # 確定点数（成功 or None）のみカウント
-        _bar_prev   = [0]   # 最後にバー更新した時の確定点数
+        _econfirmed = [0]
+        _bar_prev   = [0]
         _err_idxs   = []
         with ThreadPoolExecutor(max_workers=10) as _eex:
             for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
@@ -821,7 +770,6 @@ if st.session_state.get("_elev_status") == "running":
                         text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
                     )
         if _err_idxs:
-            # タイムアウト点が残っている → 同バッチ内で再試行
             st.session_state["_elev_retry_idxs"] = _err_idxs
             _n_confirmed = (_ee - _es) - len(_err_idxs)
             _elev_prog_area.progress(
@@ -833,8 +781,8 @@ if st.session_state.get("_elev_status") == "running":
         st.session_state["_elev_partial"] = _ep
 
         if _ebi + 1 >= _en_batches:
-            _finalize_elev(_ep)
-            _elev_prog_area.progress(1.0, text=f"✅ 標高補正完了（{st.session_state['_elev_n_ok']}/{_en} 点）")
+            _finalize_fix(_ep)
+            _elev_prog_area.progress(1.0, text="✅ 標高補正完了")
             _needs_rerun = True
         else:
             st.session_state["_elev_batch_idx"] = _ebi + 1
@@ -842,41 +790,6 @@ if st.session_state.get("_elev_status") == "running":
 
 if _needs_rerun:
     st.rerun()
-
-# 標高補正後の残り勾配チェック → ノイズダイアログ
-@st.dialog("⛰️ 標高データについて")
-def _elev_noise_dialog():
-    _cur_on = st.session_state.get("_opt_elev", False)
-    if _cur_on:
-        st.warning("補正後もノイズが残っています。元のGPX標高データに戻しますか？")
-    else:
-        st.warning("標高データにノイズがあるようです。国土地理院の標高補正を行いますか？")
-    _dc1, _dc2 = st.columns(2)
-    with _dc1:
-        if st.button("✅ はい", use_container_width=True):
-            st.session_state["_opt_elev"] = not _cur_on
-            for _dk in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok",
-                        "_elev_clean_stats", "_elev_batch_idx", "_elev_partial",
-                        "_elev_cancel_requested", "_show_elev_prompt", "_noise_prompt_done"]:
-                st.session_state.pop(_dk, None)
-            st.session_state["_force_elev"] = True
-            st.rerun()
-    with _dc2:
-        if st.button("❌ いいえ", use_container_width=True):
-            st.session_state["_noise_prompt_done"] = True
-            st.session_state.pop("_show_elev_prompt", None)
-            st.rerun()
-
-if (
-    st.session_state.get("_elev_status") == "完了"
-    and not st.session_state.get("_noise_prompt_done")
-):
-    _cs_noise = st.session_state.get("_elev_clean_stats", {})
-    if _cs_noise.get("max_grade_after", 0.0) > st.session_state.get("_elev_bad_grade", 15.0):
-        st.session_state["_show_elev_prompt"] = True
-
-if st.session_state.get("_show_elev_prompt"):
-    _elev_noise_dialog()
 
 # ─── ターン初期化（初回のみ）──────────────────
 if "edit_turns" not in st.session_state:
@@ -898,21 +811,13 @@ if "edit_turns" not in st.session_state:
                 "index": idx,
                 "name":  wpt.name or "ターンポイント",
             })
-        st.session_state["edit_turns"]   = turns
+        st.session_state["edit_turns"]    = turns
         st.session_state["_iname_status"] = "スキップ"
     else:
-        _mta = st.session_state.get("_mta", 45)
-        _md  = st.session_state.get("_md",  100)
-        _sm  = st.session_state.get("_sm",  1)
-        raw_turns = detect_turns(active_points, min_turn_angle=_mta, min_dist=_md, smooth=_sm)
-        if st.session_state.get("_opt_iname", True):
-            intersection_names = fetch_intersection_names(raw_turns)
-            st.session_state["_iname_status"]  = "完了"
-            st.session_state["_iname_n_found"] = len(intersection_names)
-        else:
-            intersection_names = {}
-            st.session_state["_iname_status"]  = "スキップ"
-            st.session_state["_iname_n_found"] = 0
+        raw_turns = detect_turns(active_points, min_turn_angle=45, min_dist=100, smooth=1)
+        intersection_names = fetch_intersection_names(raw_turns)
+        st.session_state["_iname_status"]  = "完了"
+        st.session_state["_iname_n_found"] = len(intersection_names)
         st.session_state["edit_turns"] = [
             with_name(t, intersection_names.get(t["index"]))
             for t in raw_turns
@@ -937,225 +842,49 @@ c2.metric("総距離", f"{total_dist_km:.1f} km")
 c3.metric("GPSポイント間隔（平均）", f"{avg_spacing:.0f} m")
 
 # ─────────────────────────────────────────────
-# サイドバー ─ 交差点名取得
+# 標高データ選択UI
 # ─────────────────────────────────────────────
+if st.session_state.get("_proc_status") == "done":
+    _go = st.session_state.get("_grade_org")
+    _gf = st.session_state.get("_grade_fix")
 
-st.sidebar.header("🏷️ 交差点名取得")
+    if _go is not None or _gf is not None:
+        st.divider()
+        _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+        _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
+        _rec = "fix" if _sf < _so else "org"
 
-iname_status = st.session_state.get("_iname_status")
-if iname_status == "完了":
-    n_found = st.session_state.get("_iname_n_found", 0)
-    st.sidebar.success(f"✅ {n_found} 件取得済み")
-elif iname_status == "エラー":
-    st.sidebar.error("❌ 取得失敗")
-elif iname_status == "スキップ":
-    st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
-else:
-    st.sidebar.info("⏳ 未取得")
+        def _grade_label(key, grade):
+            name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
+            if grade is None:
+                return f"{name}　—— データなし"
+            star = "　★推奨" if key == _rec else ""
+            return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
 
-_cur_iname_radius = st.session_state.get("_iname_radius", 20)
-_iname_radius = st.sidebar.slider("検索半径（m）", 10, 100, _cur_iname_radius, 5,
-                                   help="交差点ノードを探索する半径。20m推奨")
-st.session_state["_iname_radius"] = _iname_radius
+        _options = ["org", "fix"]
+        _labels  = [_grade_label("org", _go), _grade_label("fix", _gf)]
 
-if iname_status is not None:
-    st.sidebar.caption("ターンポイント付近の交差点名をOSMから取得します")
-    if st.sidebar.button("🔄 再取得", key="iname_reset"):
-        _new_inames = fetch_intersection_names(
-            st.session_state["edit_turns"], radius=_iname_radius
+        _cur = st.session_state.get("_elev_choice", _rec)
+        if _cur == "org" and _go is None:
+            _cur = "fix"
+        elif _cur == "fix" and _gf is None:
+            _cur = "org"
+
+        _sel = st.radio(
+            "⛰️ 標高データ選択",
+            _labels,
+            index=_options.index(_cur),
         )
-        for t in st.session_state["edit_turns"]:
-            if t["index"] in _new_inames:
-                new_name = with_name(t, _new_inames[t["index"]])["name"]
-                t["name"] = new_name
-                st.session_state[f"wpt_name_{t['index']}"] = new_name
-        st.session_state["_iname_status"]         = "完了"
-        st.session_state["_iname_n_found"]        = len(_new_inames)
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
-
-# ─────────────────────────────────────────────
-# サイドバー ─ ターン検出パラメータ
-# ─────────────────────────────────────────────
-
-st.sidebar.divider()
-st.sidebar.header("⚙️ ターン検出パラメータ")
-st.sidebar.markdown("""
-**アルゴリズム**: 角度法
-点 X の前後の点 A, B のベアリング差でコーナーを判定します。
-""")
-
-min_turn_angle = st.sidebar.slider(
-    "ターン角閾値（度）", 20, 120, st.session_state.get("_mta", 45), 5,
-    help="進入・離脱方向の差がこの角度以上ならコーナーとみなす。\n"
-         "45°=やや曲がりも検出、60°=交差点のみ、90°=ほぼ直角以上のみ")
-min_dist_val = st.sidebar.slider(
-    "ターン間最小距離（m）", 30, 500, st.session_state.get("_md", 100), 10,
-    help="同一交差点での重複検出を防ぐ")
-smooth_val = st.sidebar.slider(
-    "スムージング（前後N点参照）", 1, 5, st.session_state.get("_sm", 1), 1,
-    help="1=隣接点のみ（推奨）、2以上=ノイズに強いが精度低下の可能性あり")
-st.session_state["_mta"] = min_turn_angle
-st.session_state["_md"]  = min_dist_val
-st.session_state["_sm"]  = smooth_val
-
-if st.sidebar.button("🔄 自動検出を再実行（現在のターンポイントは破棄されます）", type="primary"):
-    raw_turns = detect_turns(active_points, min_turn_angle=min_turn_angle,
-                             min_dist=min_dist_val, smooth=smooth_val)
-    intersection_names = fetch_intersection_names(raw_turns)
-    st.session_state["edit_turns"] = [
-        with_name(t, intersection_names.get(t["index"]))
-        for t in raw_turns
-    ]
-    st.session_state["_iname_status"]         = "完了"
-    st.session_state["_iname_n_found"]        = len(intersection_names)
-    st.session_state.pop("pending_wpt", None)
-    st.session_state["_skip_map_center_save"] = True
-    st.rerun()
-
-# ─────────────────────────────────────────────
-# サイドバー ─ マップマッチング（Valhalla）
-# ─────────────────────────────────────────────
-
-_MM_PROFILES = {
-    "自転車 (bicycle)": "cycling",
-    "徒歩・ハイキング":  "foot",
-    "車 (auto)":       "driving",
-}
-_mm_labels = list(_MM_PROFILES.keys())
-_mm_codes  = list(_MM_PROFILES.values())
-_cur_mm_code = st.session_state.get("_mm_profile", "cycling")
-_cur_mm_idx  = _mm_codes.index(_cur_mm_code) if _cur_mm_code in _mm_codes else 0
-
-st.sidebar.divider()
-st.sidebar.header("🗺️ マップマッチング")
-
-mm_status = st.session_state.get("_mm_status")
-if mm_status == "完了":
-    n_snapped = st.session_state.get("_mm_n_snapped", 0)
-    st.sidebar.success(f"✅ {n_snapped}/{len(points)} 点スナップ済み")
-    if st.session_state.get("_mm_error"):
-        st.sidebar.caption(f"⚠️ {st.session_state['_mm_error'][:120]}")
-elif mm_status == "エラー":
-    st.sidebar.error(f"❌ マッチング失敗\n{st.session_state.get('_mm_error','')[:200]}")
-elif mm_status == "スキップ":
-    st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
-elif mm_status == "キャンセル":
-    n_snapped = st.session_state.get("_mm_n_snapped", 0)
-    st.sidebar.warning(f"⚠️ キャンセル済み（{n_snapped} 点スナップ）")
-    if st.session_state.get("_mm_error"):
-        st.sidebar.caption(st.session_state["_mm_error"][:120])
-else:
-    st.sidebar.info("⏳ 処理中…")
-
-# プロバイダ選択
-_google_key       = st.secrets.get("GOOGLE_ROADS_API_KEY", None)
-_google_available = bool(_google_key)
-_provider_labels  = ["Valhalla（OSM公開API）", "Google Maps Roads API"]
-_cur_provider     = st.session_state.get("_mm_provider", "valhalla")
-_provider_idx     = 1 if _cur_provider == "google" else 0
-
-if not _google_available or not _is_admin:
-    st.sidebar.radio("プロバイダ", [_provider_labels[0]], index=0, disabled=True)
-    st.session_state["_mm_provider"] = "valhalla"
-else:
-    _sel_provider = st.sidebar.radio("プロバイダ", _provider_labels, index=_provider_idx)
-    _new_provider = "google" if _sel_provider == _provider_labels[1] else "valhalla"
-    if _new_provider != _cur_provider:
-        for _k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
-                   "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial",
-                   "_mm_errors_partial", "_mm_cancel_requested"]:
-            st.session_state.pop(_k, None)
-    st.session_state["_mm_provider"] = _new_provider
-    _cur_provider = _new_provider
-
-if _cur_provider == "valhalla":
-    _sel_mm = st.sidebar.selectbox("プロファイル", _mm_labels, index=_cur_mm_idx)
-    st.session_state["_mm_profile"] = _MM_PROFILES[_sel_mm]
-    _cur_radius = st.session_state.get("_mm_radius", 50)
-    _mm_radius  = st.sidebar.slider("サーチ半径（m）", 10, 100, _cur_radius, 10,
-                                     help="道路を探索する半径。GPS誤差が大きいルートは大きくする")
-    st.session_state["_mm_radius"] = _mm_radius
-else:
-    st.sidebar.caption(f"APIキー: ✅ 設定済み")
-
-if mm_status is not None:
-    st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
-    if st.sidebar.button("🔄 再処理", key="mm_reset"):
-        for k in ["_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
-                  "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
-                  "_mm_cancel_requested", "pending_wpt"]:
-            st.session_state.pop(k, None)
-        st.session_state["_force_mm"]             = True
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
-
-# ─────────────────────────────────────────────
-# サイドバー ─ 標高補正
-# ─────────────────────────────────────────────
-
-st.sidebar.divider()
-st.sidebar.header("⛰️ 標高補正")
-st.sidebar.caption("データソース: 国土地理院（日本専用）")
-
-elev_status = st.session_state.get("_elev_status")
-if elev_status == "完了":
-    n_ok = st.session_state.get("_elev_n_ok", 0)
-    src  = st.session_state.get("_elev_source", "")
-    st.sidebar.success(f"✅ {n_ok}/{len(active_points)} 点取得（{src}）")
-    clean_stats = st.session_state.get("_elev_clean_stats", {})
-    clean_points = clean_stats.get("points", 0)
-    if clean_points:
-        st.sidebar.caption(
-            f"スパイク除去: {clean_stats.get('clusters', 0)} 箇所 / {clean_points} 点補正 "
-            f"（最大勾配 {clean_stats.get('max_grade_before', 0):.1f}% → "
-            f"{clean_stats.get('max_grade_after', 0):.1f}%）"
-        )
-    else:
-        st.sidebar.caption("スパイク除去: 補正対象なし")
-elif elev_status == "キャンセル":
-    n_ok = st.session_state.get("_elev_n_ok", 0)
-    src  = st.session_state.get("_elev_source", "")
-    st.sidebar.warning(f"⚠️ キャンセル済み（{n_ok}/{len(active_points)} 点取得・{src}）")
-    clean_stats = st.session_state.get("_elev_clean_stats", {})
-    clean_points = clean_stats.get("points", 0)
-    if clean_points:
-        st.sidebar.caption(
-            f"スパイク除去: {clean_stats.get('clusters', 0)} 箇所 / {clean_points} 点補正 "
-            f"（最大勾配 {clean_stats.get('max_grade_before', 0):.1f}% → "
-            f"{clean_stats.get('max_grade_after', 0):.1f}%）"
-        )
-    else:
-        st.sidebar.caption("スパイク除去: 補正対象なし")
-elif elev_status == "エラー":
-    st.sidebar.warning("⚠️ 一部取得失敗")
-elif elev_status == "海外スキップ":
-    st.sidebar.info("⏭️ スキップ（海外ルート - 元の標高を保持）")
-elif elev_status == "スキップ":
-    st.sidebar.info("⏭️ スキップ（wpt読み込みモード）")
-else:
-    st.sidebar.info("⏳ 処理中…")
-
-_elev_bad_grade = st.sidebar.slider(
-    "スパイク判定 勾配閾値（%）", 5, 25, int(st.session_state.get("_elev_bad_grade", 15)), 1,
-    help="この勾配以上 かつ 高度変化6m以上のセグメントをスパイク候補とみなす")
-st.session_state["_elev_bad_grade"] = float(_elev_bad_grade)
-
-_elev_cluster_gap = st.sidebar.slider(
-    "スパイク判定 クラスターギャップ（m）", 50, 500, int(st.session_state.get("_elev_cluster_gap", 250)), 50,
-    help="スパイク候補同士をまとめる最大距離。大きくすると広範囲のスパイクをまとめて修正")
-st.session_state["_elev_cluster_gap"] = float(_elev_cluster_gap)
-
-if elev_status is not None:
-    st.sidebar.caption("設定を変えた後は再処理ボタンを押してください")
-    if st.sidebar.button("🔄 再処理", key="elev_reset"):
-        for k in ["_elevations", "_elev_status", "_elev_source", "_elev_n_ok", "_elev_clean_stats",
-                  "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
-                  "_show_elev_prompt", "_noise_prompt_done"]:
-            st.session_state.pop(k, None)
-        st.session_state["_force_elev"]           = True
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
+        _chosen = _options[_labels.index(_sel)]
+        if _chosen == "org" and _go is None:
+            _chosen = "fix"
+        elif _chosen == "fix" and _gf is None:
+            _chosen = "org"
+        if _chosen != _cur:
+            st.session_state["_elev_choice"] = _chosen
+            st.rerun()
+        else:
+            st.session_state["_elev_choice"] = _chosen
 
 # ─────────────────────────────────────────────
 # 地図 + リストパネル
@@ -1172,16 +901,7 @@ with col_map:
     _map_init_loc = ([_saved_center["lat"], _saved_center["lng"]] if _saved_center
                      else active_points[len(active_points)//4])
     _map_init_zoom = st.session_state.get("_map_zoom", 13)
-    _cur_provider  = st.session_state.get("_mm_provider", "valhalla")
-    if _cur_provider == "google":
-        m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom, tiles=None)
-        folium.TileLayer(
-            tiles="https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}",
-            attr='© <a href="https://www.google.com/maps">Google Maps</a>',
-            name="Google Maps", max_zoom=20,
-        ).add_to(m)
-    else:
-        m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom)
+    m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom)
     folium.PolyLine(active_points, color="#3498db", weight=4, opacity=0.8).add_to(m)
     folium.Marker(active_points[0],  tooltip="スタート",
                   icon=folium.Icon(color="green",   icon="play", prefix="fa")).add_to(m)
@@ -1266,7 +986,7 @@ if map_data:
                     "is_start_goal": True,
                 }
             else:
-                sm = smooth_val
+                sm = 1
                 if sm <= idx < len(active_points) - sm:
                     b_in  = calculate_bearing(
                         active_points[idx - sm][0], active_points[idx - sm][1],
@@ -1285,8 +1005,7 @@ if map_data:
                     "delta": wpt_delta,
                     "index": idx,
                 }
-                _iname_radius = st.session_state.get("_iname_radius", 20)
-                _inames = fetch_intersection_names([_temp], radius=_iname_radius)
+                _inames = fetch_intersection_names([_temp], radius=20)
                 _iname = _inames.get(idx)
                 if wpt_delta is not None:
                     wpt_name = with_name(_temp, _iname)["name"]
@@ -1370,13 +1089,16 @@ with col_list:
 st.divider()
 st.subheader("💾 強化GPXの出力")
 
-applied = []
+_applied = []
 if st.session_state.get("_mm_status") == "完了":
-    applied.append("🗺️ マップマッチング済み")
-if st.session_state.get("_elev_status") == "完了":
-    applied.append(f"⛰️ 標高補正済み（{st.session_state.get('_elev_source', '')}）")
-if applied:
-    st.info("出力GPXに適用: " + " ／ ".join(applied))
+    _applied.append("🗺️ マップマッチング済み")
+_choice = st.session_state.get("_elev_choice")
+if _choice == "fix" and st.session_state.get("_trkpt_fix_elevs") is not None:
+    _applied.append("⛰️ 標高補正済み（国土地理院）")
+elif _choice == "org" and st.session_state.get("_trkpt_org_elevs") is not None:
+    _applied.append("⛰️ 標高補正済み（元データ）")
+if _applied:
+    st.info("出力GPXに適用: " + " ／ ".join(_applied))
 
 col_dl1, col_dl2, _ = st.columns([1, 1, 2])
 col_dl1.metric("ターンポイント数", len(current_turns))
@@ -1390,11 +1112,15 @@ with col_dl2:
             tc["name"] = st.session_state.get(widget_key, t.get("name", "ターンポイント"))
             turns_for_build.append(tc)
 
+        _out_elevs = (
+            st.session_state.get("_trkpt_fix_elevs") if _choice == "fix"
+            else st.session_state.get("_trkpt_org_elevs")
+        )
         xml_output = build_enhanced_gpx(
             raw_content,
             turns_for_build,
             matched_points=st.session_state.get("_matched_points"),
-            elevations=st.session_state.get("_elevations"),
+            elevations=_out_elevs,
         )
         base_name = uploaded.name.replace(".gpx", "")
         st.download_button(
