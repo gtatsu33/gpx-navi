@@ -401,6 +401,7 @@ async function deleteRoute(id) {
 }
 
 const escHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const stripBrackets = name => (name.startsWith('「') && name.endsWith('」')) ? name.slice(1, -1) : name;
 
 // ── Turn Styles ───────────────────────────────────────
 function bcToTurnName(bc) {
@@ -412,6 +413,7 @@ function bcToTurnName(bc) {
 }
 // ── Turn Name Reverse ─────────────────────────────
 function reverseTurnName(name) {
+  if (name.startsWith('「') && name.endsWith('」')) return name;
   if (name.includes('やや右')) return name.replace('やや右', 'やや左');
   if (name.includes('やや左')) return name.replace('やや左', 'やや右');
   if (name.includes('右折'))   return name.replace('右折', '左折');
@@ -785,7 +787,7 @@ function initMap() {
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
     const s = getTurnStyle(bcToTurnName(wp.bearingChange));
     L.circleMarker([wp.lat, wp.lon], { radius:7, color:s.color, fillColor:s.color, fillOpacity:0.9, weight:2 })
-     .bindTooltip(`${i+1}. ${s.arrow} ${wp.name}`).addTo(map);
+     .bindTooltip(`${i+1}. ${s.arrow} ${stripBrackets(wp.name)}`).addTo(map);
   });
 
   currentHeading = null;
@@ -817,8 +819,8 @@ function updateTargetMarker() {
   } else {
     targetMarker = L.marker([wp.lat, wp.lon], { icon, zIndexOffset: 900 }).addTo(map);
   }
-  targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${wp.name}`, { permanent: false });
-  const statusText = `[${targetIdx}/${waypoints.length-1}] ${wp.name}`;
+  targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${stripBrackets(wp.name)}`, { permanent: false });
+  const statusText = `[${targetIdx}/${waypoints.length-1}] ${stripBrackets(wp.name)}`;
   document.getElementById('nav-status').textContent = statusText;
   dbgLog(`[TGT] ${targetIdx}/${waypoints.length-1} "${wp.name}" goal=${wp.isGoal}`);
   // posMarker が存在すれば現在地からd0を計算してフェーズ構築
@@ -838,38 +840,38 @@ const formatDistVoice = m => m >= 1000
 // targetIdx が変わった瞬間（posMarker が現在地にいる前提）に呼ぶ。
 // d0: 現在地 → 新しい目標までの距離
 function buildAnnouncePhases(d0, wpName, isGoal) {
-  const label = isGoal ? 'ゴール' : wpName;
+  const poi   = !isGoal && wpName.startsWith('「') && wpName.endsWith('」');
+  const label = isGoal ? 'ゴール' : stripBrackets(wpName);
 
-  phasesBuilt = true;  // ← 追加
+  phasesBuilt = true;
+
+  const closeTxt = isGoal ? '目的地です' : (poi ? `${label}です` : `${label}してください`);
+  const nearTxt  = isGoal ? 'まもなく目的地です' : `まもなく${label}です`;
 
   if (d0 > 300) {
-    // ①即発話 ②300m付近 ③100m ④15m
     announcePhases = [
       { trigger: 'far',  text: `約${formatDistVoice(d0)}先、${label}です` },
       { trigger: '300',  text: `約300メートル先、${label}です` },
-      { trigger: '100',  text: isGoal ? 'まもなく目的地です' : `まもなく${label}です` },
-      { trigger: '15',   text: isGoal ? '目的地です' : `${label}してください` },
+      { trigger: '100',  text: nearTxt },
+      { trigger: '15',   text: closeTxt },
     ];
   } else if (d0 > 100) {
-    // ①即発話 ②100m ③15m
     announcePhases = [
       { trigger: 'far',  text: `約${formatDistVoice(d0)}先、${label}です` },
-      { trigger: '100',  text: isGoal ? 'まもなく目的地です' : `まもなく${label}です` },
-      { trigger: '15',   text: isGoal ? '目的地です' : `${label}してください` },
+      { trigger: '100',  text: nearTxt },
+      { trigger: '15',   text: closeTxt },
     ];
   } else if (d0 > 15) {
-    // ①即発話（まもなく） ②15m
     announcePhases = [
-      { trigger: 'far',  text: isGoal ? 'まもなく目的地です' : `まもなく${label}です` },
-      { trigger: '15',   text: isGoal ? '目的地です' : `${label}してください` },
+      { trigger: 'far',  text: nearTxt },
+      { trigger: '15',   text: closeTxt },
     ];
   } else {
-    // ①即発話（してください）
     announcePhases = [
-      { trigger: 'far',  text: isGoal ? '目的地です' : `${label}してください` },
+      { trigger: 'far',  text: closeTxt },
     ];
   }
-  dbgLog(`[ANN] d0=${Math.round(d0)}m phases=${announcePhases.map(p=>p.trigger).join(',')}`);
+  dbgLog(`[ANN] d0=${Math.round(d0)}m phases=${announcePhases.map(p=>p.trigger).join(',')} poi=${poi}`);
   // 'far' は2秒後に発話（「ナビを開始します」との競合を避けるため）
   if (announcePhases.length > 0 && announcePhases[0].trigger === 'far') {
     const farText = announcePhases.shift().text;
@@ -1027,7 +1029,7 @@ function updateNavPanel(lat, lon) {
   document.getElementById('turn-arrow').style.color           = s.color;
   document.getElementById('turn-distance').textContent        = formatDist(dist);
   document.getElementById('turn-distance').style.color        = s.color;
-  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${wp.name}`;
+  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${stripBrackets(wp.name)}`;
 
   // 次のウェイポイント情報waypoints
   const next = waypoints[targetIdx + 1];
@@ -1036,7 +1038,7 @@ function updateNavPanel(lat, lon) {
     const nd  = geoDist(lat, lon, next.lat, next.lon);
     document.getElementById('turn-next').innerHTML = next.isGoal
       ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
-      : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${next.name}</span><span class="next-val">　${formatDist(nd)}先</span>`;
+      : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${stripBrackets(next.name)}</span><span class="next-val">　${formatDist(nd)}先</span>`;
   } else if (!wp.isGoal) {
     document.getElementById('turn-next').innerHTML =
       `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
@@ -1086,7 +1088,7 @@ function rerouteToNearest() {
   updateTargetMarker();
   const wp = waypoints[bestWpIdx];
   const dWp = geoDist(pos.lat, pos.lng, wp.lat, wp.lon);
-  showToast(`「${wp.name}」へ復帰（${Math.round(dWp)}m先）`);
+  showToast(`「${stripBrackets(wp.name)}」へ復帰（${Math.round(dWp)}m先）`);
   updateNavPanel(pos.lat, pos.lng);
 }
 

@@ -188,6 +188,36 @@ def fetch_intersection_names(turns, radius=20):
     prog.empty()
     return result
 
+def fetch_spot_name(lat, lon, radius=20):
+    """クリック位置付近のPOI名を取得する（交差点名が見つからなかった場合のフォールバック）。"""
+    tags = ["tourism", "amenity", "leisure", "historic", "natural", "shop"]
+    union_parts = "".join(
+        f'node(around:{radius},{lat},{lon})[name]["{tag}"];'
+        for tag in tags
+    )
+    query = f"[out:json][timeout:10];({union_parts});out body;"
+    for url in _OVERPASS_URLS:
+        try:
+            resp = requests.post(
+                url,
+                data="data=" + urllib.parse.quote(query),
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "GPXTurnDetector/1.0",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            elements = resp.json().get("elements", [])
+            if not elements:
+                return None
+            nearest = min(elements, key=lambda e: haversine(lat, lon, e["lat"], e["lon"]))
+            return nearest.get("tags", {}).get("name")
+        except Exception:
+            pass
+    return None
+
 # ─────────────────────────────────────────────
 # マップマッチング（Valhalla / OSM公式インスタンス・自転車固定）
 # ─────────────────────────────────────────────
@@ -1018,7 +1048,8 @@ if map_data:
                 elif _iname:
                     wpt_name = _iname
                 else:
-                    wpt_name = "追加したターンポイント"
+                    _spot = fetch_spot_name(active_points[idx][0], active_points[idx][1], radius=20)
+                    wpt_name = f"「{_spot}」" if _spot else "追加したターンポイント"
                 turns_list = st.session_state["edit_turns"]
                 insert_at = next(
                     (j for j, t in enumerate(turns_list) if t["index"] > idx),
