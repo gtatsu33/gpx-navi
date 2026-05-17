@@ -402,6 +402,8 @@ async function deleteRoute(id) {
 
 const escHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stripBrackets = name => (name.startsWith('「') && name.endsWith('」')) ? name.slice(1, -1) : name;
+const displayName   = name => stripBrackets(name).replace(/（[^）]*）/g, '');
+const spokenName    = name => { const n = stripBrackets(name); const m = n.match(/（([^）]+)）/); return m ? m[1] : n; };
 
 // ── Turn Styles ───────────────────────────────────────
 function bcToTurnName(bc) {
@@ -787,7 +789,7 @@ function initMap() {
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
     const s = getTurnStyle(bcToTurnName(wp.bearingChange));
     L.circleMarker([wp.lat, wp.lon], { radius:7, color:s.color, fillColor:s.color, fillOpacity:0.9, weight:2 })
-     .bindTooltip(`${i+1}. ${s.arrow} ${stripBrackets(wp.name)}`).addTo(map);
+     .bindTooltip(`${i+1}. ${s.arrow} ${displayName(wp.name)}`).addTo(map);
   });
 
   currentHeading = null;
@@ -819,8 +821,8 @@ function updateTargetMarker() {
   } else {
     targetMarker = L.marker([wp.lat, wp.lon], { icon, zIndexOffset: 900 }).addTo(map);
   }
-  targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${stripBrackets(wp.name)}`, { permanent: false });
-  const statusText = `[${targetIdx}/${waypoints.length-1}] ${stripBrackets(wp.name)}`;
+  targetMarker.bindTooltip(`🎯 目標[${targetIdx}]: ${displayName(wp.name)}`, { permanent: false });
+  const statusText = `[${targetIdx}/${waypoints.length-1}] ${displayName(wp.name)}`;
   document.getElementById('nav-status').textContent = statusText;
   dbgLog(`[TGT] ${targetIdx}/${waypoints.length-1} "${wp.name}" goal=${wp.isGoal}`);
   // posMarker が存在すれば現在地からd0を計算してフェーズ構築
@@ -841,7 +843,7 @@ const formatDistVoice = m => m >= 1000
 // d0: 現在地 → 新しい目標までの距離
 function buildAnnouncePhases(d0, wpName, isGoal) {
   const poi   = !isGoal && wpName.startsWith('「') && wpName.endsWith('」');
-  const label = isGoal ? 'ゴール' : stripBrackets(wpName);
+  const label = isGoal ? 'ゴール' : spokenName(wpName);
 
   phasesBuilt = true;
 
@@ -1029,7 +1031,7 @@ function updateNavPanel(lat, lon) {
   document.getElementById('turn-arrow').style.color           = s.color;
   document.getElementById('turn-distance').textContent        = formatDist(dist);
   document.getElementById('turn-distance').style.color        = s.color;
-  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${stripBrackets(wp.name)}`;
+  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${displayName(wp.name)}`;
 
   // 次のウェイポイント情報waypoints
   const next = waypoints[targetIdx + 1];
@@ -1038,7 +1040,7 @@ function updateNavPanel(lat, lon) {
     const nd  = geoDist(lat, lon, next.lat, next.lon);
     document.getElementById('turn-next').innerHTML = next.isGoal
       ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
-      : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${stripBrackets(next.name)}</span><span class="next-val">　${formatDist(nd)}先</span>`;
+      : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${displayName(next.name)}</span><span class="next-val">　${formatDist(nd)}先</span>`;
   } else if (!wp.isGoal) {
     document.getElementById('turn-next').innerHTML =
       `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`;
@@ -1088,7 +1090,7 @@ function rerouteToNearest() {
   updateTargetMarker();
   const wp = waypoints[bestWpIdx];
   const dWp = geoDist(pos.lat, pos.lng, wp.lat, wp.lon);
-  showToast(`「${stripBrackets(wp.name)}」へ復帰（${Math.round(dWp)}m先）`);
+  showToast(`「${displayName(wp.name)}」へ復帰（${Math.round(dWp)}m先）`);
   updateNavPanel(pos.lat, pos.lng);
 }
 
