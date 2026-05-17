@@ -944,6 +944,12 @@ if map_data and not _skip_map_center_save:
     if map_data.get("zoom") is not None:
         st.session_state["_map_zoom"] = map_data["zoom"]
 
+# 手動編集した名前を edit_turns に同期（rerun で widget state が消える前に保持）
+for _sync_t in st.session_state.get("edit_turns", []):
+    _sync_key = f"wpt_name_{_sync_t['index']}"
+    if _sync_key in st.session_state:
+        _sync_t["name"] = st.session_state[_sync_key]
+
 # ─── マップクリック → pending_wpt 更新 ─────────
 if map_data:
     tooltip_val = map_data.get("last_object_clicked_tooltip") or ""
