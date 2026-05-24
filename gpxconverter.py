@@ -17,11 +17,11 @@ import requests
 import urllib.parse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
 st.title("🚴 GPX ターン検出・強化ツール")
 
-_is_admin = (st.query_params.get("admin", "") == st.secrets.get("ADMIN_TOKEN", "__unset__"))
 st.caption("Stravaなどのターン情報なしGPXにナビ用ターンポイントを追加します")
 
 # ─────────────────────────────────────────────
@@ -560,6 +560,7 @@ _STATE_KEYS = [
     "_trkpt_org_elevs", "_trkpt_fix_elevs", "_grade_org", "_grade_fix", "_elev_choice",
     "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
     "_iname_status",  "_iname_n_found",
+    "_focus_wpt_idx",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
     st.session_state["_file_name"] = uploaded.name
@@ -941,7 +942,7 @@ with col_map:
     for i, t in enumerate(current_turns):
         arrow, hex_color = wpt_style(t)
         delta = t.get("delta")
-        popup_html = (f"<b>{arrow} {t['name']}</b>"
+        popup_html = (f"<b>wpt:{i+1} {arrow} {t['name']}</b>"
                       + (f"<br>ターン角: {delta:+.1f}°" if delta is not None else "")
                       + f"<br>trkpt: {t['index']}")
         tooltip_str = f"wpt:{i+1} / trkpt:{t['index']} {arrow} {t['name']}"
@@ -952,10 +953,11 @@ with col_map:
             popup=folium.Popup(popup_html, max_width=200),
         ).add_to(m)
 
-    if pending:
+    if pending and pending.get("is_start_goal"):
+        label = "スタート" if pending["index"] == 0 else "ゴール"
         folium.Marker(
             [pending["lat"], pending["lon"]],
-            tooltip=f"追加予定 trkpt#{pending['index']}",
+            tooltip=f"{label}地点は追加できません",
             icon=folium.Icon(color="orange", icon="star", prefix="fa"),
         ).add_to(m)
 
@@ -990,11 +992,13 @@ if map_data:
         if map_data.get("last_clicked"):
             click = map_data["last_clicked"]
             st.session_state["_handled_click"] = (round(click["lat"], 7), round(click["lng"], 7))
-        st.session_state["pending_wpt"] = {
-            "index": trkpt_idx,
-            "lat":   active_points[trkpt_idx][0],
-            "lon":   active_points[trkpt_idx][1],
-        }
+        _focus_idx = next(
+            (j for j, t in enumerate(current_turns) if t["index"] == trkpt_idx),
+            None,
+        )
+        if _focus_idx is not None:
+            st.session_state["_focus_wpt_idx"] = _focus_idx
+        st.session_state.pop("pending_wpt", None)
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
@@ -1008,11 +1012,8 @@ if map_data:
                 None,
             )
             if existing_idx is not None:
-                st.session_state["pending_wpt"] = {
-                    "index": idx,
-                    "lat":   active_points[idx][0],
-                    "lon":   active_points[idx][1],
-                }
+                st.session_state["_focus_wpt_idx"] = existing_idx
+                st.session_state.pop("pending_wpt", None)
             elif idx == 0 or idx == len(active_points) - 1:
                 st.session_state["pending_wpt"] = {
                     "index": idx,
@@ -1063,59 +1064,80 @@ if map_data:
 # ─── 右パネル（リスト） ───────────────────────
 with col_list:
     st.subheader(f"📋 ターンポイント一覧　({len(current_turns)}件)")
+    st.markdown("""<style>
+    [data-testid="stButton"] button {
+        font-size: 0.72rem !important;
+        padding: 2px 6px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    [data-testid="stButton"] button p {
+        font-size: 0.72rem !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stTextInput"] input {
+        font-size: 0.72rem !important;
+        padding: 2px 6px !important;
+    }
+    </style>""", unsafe_allow_html=True)
 
-    if not current_turns and not pending:
-        st.warning("ターンポイントが検出されませんでした。\nターン角閾値を下げてみてください。")
+    with st.container(height=520):
+        if not current_turns and not pending:
+            st.warning("ターンポイントが検出されませんでした。\nターン角閾値を下げてみてください。")
 
-    for i, t in enumerate(current_turns):
-        arrow, hex_color = wpt_style(t)
-        delta = t.get("delta")
-        badge = f"{delta:+.1f}°" if delta is not None else "手動"
-        st.markdown(
-            f'<div style="border-left:4px solid {hex_color};padding:3px 8px;'
-            f'background:#f8f9fa;border-radius:3px;margin-bottom:2px;">'
-            f'<b>{i+1}. {arrow}</b> <small style="color:#888">{badge} | trkpt:{t["index"]}</small></div>',
-            unsafe_allow_html=True,
-        )
-        col_n, col_d = st.columns([5, 1])
-        with col_n:
-            _wkey = f"wpt_name_{t['index']}"
-            if _wkey not in st.session_state:
-                st.session_state[_wkey] = t["name"]
-            st.text_input(
-                "名前",
-                key=_wkey,
-                label_visibility="collapsed",
-            )
-        with col_d:
-            if st.button("🗑", key=f"del_{t['index']}", help="削除"):
-                st.session_state["edit_turns"].pop(i)
-                st.session_state.pop("pending_wpt", None)
-                st.rerun()
+        for i, t in enumerate(current_turns):
+            arrow, hex_color = wpt_style(t)
+            delta = t.get("delta")
+            badge = f"{delta:+.1f}°" if delta is not None else "手動"
+            _lat, _lng, _tidx = t["lat"], t["lon"], t["index"]
+            col_c, col_n, col_d = st.columns([3, 5, 1])
+            with col_c:
+                if st.button(
+                    f"{i+1} | {arrow} | trkpt: {_tidx}",
+                    key=f"center_{_tidx}",
+                    use_container_width=True,
+                    help="地図を移動",
+                ):
+                    st.session_state["_map_center"] = {"lat": _lat, "lng": _lng}
+                    st.session_state["_focus_wpt_idx"] = i
+                    st.session_state["_skip_map_center_save"] = True
+                    st.rerun()
+            with col_n:
+                _wkey = f"wpt_name_{t['index']}"
+                if _wkey not in st.session_state:
+                    st.session_state[_wkey] = t["name"]
+                st.text_input(
+                    "名前",
+                    key=_wkey,
+                    label_visibility="collapsed",
+                )
+            with col_d:
+                if st.button("🗑", key=f"del_{t['index']}", help="削除"):
+                    st.session_state["edit_turns"].pop(i)
+                    st.session_state.pop("pending_wpt", None)
+                    st.rerun()
 
-    # ─── 保留ターンポイント追加／削除UI ──────────
-    if pending:
-        st.divider()
-
-        existing_idx = next(
-            (j for j, t in enumerate(current_turns) if t["index"] == pending["index"]),
-            None,
-        )
-
-        if pending.get("is_start_goal"):
+        if pending and pending.get("is_start_goal"):
+            st.divider()
             label = "スタート" if pending["index"] == 0 else "ゴール"
             st.error(f"{label}地点は追加できません")
-        elif existing_idx is not None:
-            existing = current_turns[existing_idx]
-            ex_arrow, ex_color = wpt_style(existing)
-            st.markdown(
-                f'<div style="border-left:4px solid {ex_color};padding:6px 10px;'
-                f'border-radius:4px;background:#fff3cd;">'
-                f'<b>{ex_arrow} {existing["name"]}</b><br>'
-                f'<small>trkpt #{pending["index"]}</small></div>',
-                unsafe_allow_html=True,
+
+        _focus_wpt_idx = st.session_state.pop("_focus_wpt_idx", None)
+        if _focus_wpt_idx is not None:
+            components.html(
+                f"""<script>
+                setTimeout(function() {{
+                    var inputs = window.parent.document.querySelectorAll('[data-testid="stTextInput"] input');
+                    var el = inputs[{_focus_wpt_idx}];
+                    if (el) {{
+                        el.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                        el.focus();
+                    }}
+                }}, 300);
+                </script>""",
+                height=0,
             )
-            st.warning("既存のターンポイントを選択しています")
 
     st.caption("💡 地図をクリックして新しいポイントを追加。ナビゲーションの内容は、「左折」「やや左」「直進」「やや右」「右折」を推奨しますが、フリーワードです。「左」、「右」の文字を入れておくと逆走時に正しく変換されます")
 
