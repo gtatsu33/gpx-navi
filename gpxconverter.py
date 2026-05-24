@@ -1002,7 +1002,6 @@ if map_data:
         click     = map_data["last_clicked"]
         click_key = (round(click["lat"], 7), round(click["lng"], 7))
         if click_key != st.session_state.get("_handled_click"):
-            st.session_state["_handled_click"] = click_key
             idx = nearest_trkpt_index(click["lat"], click["lng"], active_points)
             existing_idx = next(
                 (j for j, t in enumerate(current_turns) if t["index"] == idx),
@@ -1057,6 +1056,7 @@ if map_data:
                 )
                 turns_list.insert(insert_at, {**_temp, "name": wpt_name})
                 st.session_state.pop("pending_wpt", None)
+            st.session_state["_handled_click"] = click_key
             st.session_state["_skip_map_center_save"] = True
             st.rerun()
 
