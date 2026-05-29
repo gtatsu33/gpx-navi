@@ -9,6 +9,12 @@
   #map  { width: 100%; height: 100vh; }
   #load { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
           font-family:sans-serif; color:#666; font-size:14px; pointer-events:none; }
+  .dlg-btn {
+    display:block; width:100%; text-align:left; cursor:pointer;
+    border:none; background:none; padding:5px 4px;
+    font-family:sans-serif; font-size:13px; line-height:1.5; border-radius:3px;
+  }
+  .dlg-btn:hover { background:#f0f0f0; }
 </style>
 </head>
 <body>
@@ -18,7 +24,7 @@ function _post(obj) { obj.isStreamlitMessage = true; window.parent.postMessage(o
 function _setH(h)   { _post({type:'streamlit:setFrameHeight', height:h}); }
 function _setV(v)   { _post({type:'streamlit:setComponentValue', value:v, dataType:'json'}); }
 
-var map=null, _layers=[];
+var map=null, _layers=[], _curTrkpts=[];
 
 function _hav(a,b,c,d){
   var R=6371000,dA=(c-a)*Math.PI/180,dB=(d-b)*Math.PI/180;
@@ -44,10 +50,24 @@ function _pin(color,label){
     +' font-family="sans-serif">'+label+'</text></svg>';
   return L.divIcon({html:s,iconSize:[26,38],iconAnchor:[13,38],className:''});
 }
+function _acptIcon(){
+  return L.divIcon({
+    html:'<div style="width:14px;height:14px;border-radius:50%;background:white;border:2px solid #2c3e50;box-sizing:border-box;"></div>',
+    iconSize:[14,14],iconAnchor:[7,7],className:''
+  });
+}
+
+window._dlg = function(action,lat,lng,nidx){
+  map.closePopup();
+  if(action!=='cancel'){
+    _send({type:'dialog_result',action:action,lat:lat,lng:lng,nearest_trkpt_idx:nidx});
+  }
+};
 
 function renderMap(data,height){
   var el=document.getElementById('load');if(el)el.remove();
   var trkpts=data.trkpts||[],acpts=data.acpts||[],wpts=data.wpts||[];
+  _curTrkpts=trkpts;
   var pyC=data.center,pyZ=data.zoom,force=data.force_center,thr=data.click_threshold_px||20;
   var sc=null;try{sc=JSON.parse(localStorage.getItem('gpxnavi_map_center')||'null');}catch(e){}
   var sz=parseInt(localStorage.getItem('gpxnavi_map_zoom')||'0')||null;
@@ -63,34 +83,59 @@ function renderMap(data,height){
       localStorage.setItem('gpxnavi_map_center',JSON.stringify({lat:c.lat,lng:c.lng}));
       localStorage.setItem('gpxnavi_map_zoom',String(map.getZoom()));
     });
-    map.on('click',function(e){
-      var lat=e.latlng.lat,lng=e.latlng.lng,n=_near(trkpts,lat,lng);
-      if(n===null||n.dist>_pxM(thr,map.getZoom(),lat))_send({type:'click_empty',lat:lat,lng:lng});
-    });
   }else{
     if(force)map.setView([iC.lat,iC.lng],iZ);
-    map.off('click');
-    map.on('click',function(e){
-      var lat=e.latlng.lat,lng=e.latlng.lng,n=_near(trkpts,lat,lng);
-      if(n===null||n.dist>_pxM(thr,map.getZoom(),lat))_send({type:'click_empty',lat:lat,lng:lng});
-    });
   }
+  map.off('click');
+  map.on('click',function(e){
+    var lat=e.latlng.lat,lng=e.latlng.lng,n=_near(_curTrkpts,lat,lng);
+    if(n===null||n.dist>_pxM(thr,map.getZoom(),lat)){
+      _send({type:'click_empty',lat:lat,lng:lng});
+    }else{
+      var ni=n.idx;
+      var content='<div style="min-width:168px">'
+        +'<button class="dlg-btn" onclick="window._dlg(\'extend\','+lat+','+lng+','+ni+')">📍 ゴールを延長する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'acpt\','+lat+','+lng+','+ni+')">⚓ アンカーポイントを挿入する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'wpt\','+lat+','+lng+','+ni+')">🔀 ターンポイントを追加する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'cancel\','+lat+','+lng+','+ni+')">✖ キャンセル</button>'
+        +'</div>';
+      L.popup({closeButton:true,closeOnClick:false,minWidth:180})
+        .setLatLng([_curTrkpts[ni][0],_curTrkpts[ni][1]])
+        .setContent(content).openOn(map);
+    }
+  });
   _layers.forEach(function(l){map.removeLayer(l);});_layers=[];
   function add(l){l.addTo(map);_layers.push(l);}
   if(trkpts.length>1)add(L.polyline(trkpts,{color:'#3498db',weight:4,opacity:0.8}));
   wpts.forEach(function(w,i){
+    var m;
     if(i===0){
-      add(L.marker([w.lat,w.lng],{icon:_pin('#27ae60','S')}).bindTooltip('スタート: '+w.name));
+      m=L.marker([w.lat,w.lng],{icon:_pin('#27ae60','S')}).bindTooltip('スタート: '+w.name);
     }else if(i===wpts.length-1){
-      add(L.marker([w.lat,w.lng],{icon:_pin('#c0392b','G')}).bindTooltip('ゴール: '+w.name));
+      m=L.marker([w.lat,w.lng],{icon:_pin('#c0392b','G')}).bindTooltip('ゴール: '+w.name);
     }else{
-      add(L.circleMarker([w.lat,w.lng],{radius:9,color:w.color,fillColor:w.color,fillOpacity:0.9,weight:2})
-        .bindTooltip('wpt:'+(i+1)+' '+w.name));
+      m=L.circleMarker([w.lat,w.lng],{radius:9,color:w.color,fillColor:w.color,fillOpacity:0.9,weight:2})
+        .bindTooltip('wpt:'+(i+1)+' '+w.name);
     }
+    (function(idx){
+      m.on('click',function(e){L.DomEvent.stopPropagation(e);_send({type:'wpt_click',wpt_idx:idx});});
+    })(i);
+    add(m);
   });
   acpts.forEach(function(a,i){
-    add(L.circleMarker([a.lat,a.lng],{radius:6,color:'#2c3e50',fillColor:'white',fillOpacity:1,weight:2})
-      .bindTooltip('acpt:'+(i+1)));
+    var m=L.marker([a.lat,a.lng],{icon:_acptIcon(),draggable:true,zIndexOffset:500})
+      .bindTooltip('acpt:'+(i+1)+' (右クリックで削除)');
+    (function(idx){
+      m.on('dragend',function(e){
+        var pos=e.target.getLatLng();
+        _send({type:'acpt_drag_end',acpt_idx:idx,lat:pos.lat,lng:pos.lng});
+      });
+      m.on('contextmenu',function(e){
+        L.DomEvent.stopPropagation(e);
+        _send({type:'acpt_delete',acpt_idx:idx});
+      });
+    })(i);
+    add(m);
   });
   _setH(height||520);
 }

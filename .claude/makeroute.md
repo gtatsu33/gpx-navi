@@ -144,6 +144,26 @@ OSRM /route の呼び出し：`境界A（前） → acpt → 境界B（後）`
 
 境界がwptやスタート/ゴールの場合もその座標をそのままOSRMに渡す。
 
+**`_adj_idx()` ヘルパー仕様（gpxconverter.py内）：**
+
+```python
+def _adj_idx(trkpt_idx, acpts, wpts, n_pts, direction):
+    """
+    acpts と wpts の両方を境界候補として、
+    direction < 0 → trkpt_idx より前の最大インデックスを返す
+    direction > 0 → trkpt_idx より後の最小インデックスを返す
+    """
+    boundary_idxs = [a["trkpt_idx"] for a in acpts] + [t["index"] for t in wpts]
+    if direction < 0:
+        cands = [i for i in boundary_idxs if i < trkpt_idx]
+        return max(cands) if cands else 0
+    else:
+        cands = [i for i in boundary_idxs if i > trkpt_idx]
+        return min(cands) if cands else n_pts - 1
+```
+
+呼び出し元（`acpt_drag_end`・`acpt_delete`・`dialog_result: action="acpt"`）でも `wpts` を第3引数として渡す。
+
 ### wpt検出タイミング
 
 **自動実行（GPX読み込み時のみ）：**
@@ -338,8 +358,15 @@ acpt_drag_end
   → _undo_state に保存
   → acptの座標を更新
   → 前後セグメントを calc_route_segment() で再計算
-    ※ S（先頭acpt）ドラッグ：後のセグメントのみ再計算（前の境界 = ドラッグ後の新S位置）
-    ※ G（末尾acpt）ドラッグ：前のセグメントのみ再計算（後の境界 = ドラッグ後の新G位置）
+    ※ 境界点は「直前/直後のacpt → なければ直前/直後のwpt → なければスタート/ゴール」の優先順
+    ※ S（先頭acpt）ドラッグ：後のセグメントのみ再計算
+       後の境界 = 直後のacptまたはwpt（最寄り優先）
+       境界より後ろの区間（trkpt・wpt）は保持される
+    ※ G（末尾acpt）ドラッグ：前のセグメントのみ再計算
+       前の境界 = 直前のacptまたはwpt（最寄り優先）
+       境界より前の区間（trkpt・wpt）は保持される
+    ※ 中間acptドラッグ：前後セグメントをともに再計算
+  → _adj_idx() は acpts と wpts の両方を境界候補として検索する
   → route_modified = True
   → rerun
 
@@ -526,6 +553,13 @@ gpx-navi/
   - 「アンカーポイントを挿入する」→ そのtrkpt位置にacptが増え、セグメントが分割されることを確認
   - 「ターンポイントを追加する」→ 右パネルにwptが追加されることを確認
   - 「キャンセル」→ 何も変化しないことを確認
+- S（スタート）acptを右クリック削除 → 次のacptがスタートに昇格し、trkptの前方が切り捨てられることを確認
+- G（ゴール）acptを右クリック削除 → 前のacptがゴールに昇格し、trkptの後方が切り捨てられることを確認
+- acptが1つだけの状態で削除 → ルートが空になることを確認
+- Sをドラッグ → スタート位置が移動し後方セグメントのみ再計算されることを確認
+  - wptが複数ある場合：最初のwptが境界となり、そのwptより後ろのwptが保持されることを確認
+- Gをドラッグ → ゴール位置が移動し前方セグメントのみ再計算されることを確認
+  - wptが複数ある場合：最後のwptが境界となり、そのwptより前のwptが保持されることを確認
 - **往復ルートシナリオ**：A→B→Aと折り返すルートを作り、復路でゴールを延長できることを確認
 - **ループシナリオ**：スタート付近に戻ってきたとき、ダイアログで「ゴールを延長する」を選べばループが閉じられることを確認
 - wptマーカーをクリック → 右パネルの対応テキストボックスにフォーカスが当たることを確認
