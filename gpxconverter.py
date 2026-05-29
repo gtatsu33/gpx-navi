@@ -11,8 +11,8 @@ import gpxpy
 import gpxpy.gpx
 import math
 import numpy as np
-import folium
-from streamlit_folium import st_folium
+from leaflet_map import render_map
+from routing import calc_route_segment
 import requests
 import urllib.parse
 import threading
@@ -122,9 +122,9 @@ def wpt_style(t):
 # ─────────────────────────────────────────────
 
 _OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
 def fetch_intersection_names(turns, radius=20):
@@ -561,6 +561,11 @@ _STATE_KEYS = [
     "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
     "_iname_status",  "_iname_n_found",
     "_focus_wpt_idx",
+    "_map_event_ts",
+    "acpts",
+    "_active_points_edit",
+    "_undo_state",
+    "route_modified",
 ]
 if st.session_state.get("_file_name") != uploaded.name:
     st.session_state["_file_name"] = uploaded.name
@@ -665,6 +670,9 @@ if st.session_state.get("_mm_status") == "running":
             st.rerun()
 
 active_points = st.session_state.get("_matched_points", points)
+# acpt操作でtrkptが更新されていれば上書き
+if "_active_points_edit" in st.session_state:
+    active_points = st.session_state["_active_points_edit"]
 
 # ─────────────────────────────────────────────
 # 標高処理（org: 元GPX＋スパイク補正 / fix: GSI＋スパイク補正）
@@ -849,12 +857,27 @@ if "edit_turns" not in st.session_state:
         intersection_names = fetch_intersection_names(raw_turns)
         st.session_state["_iname_status"]  = "完了"
         st.session_state["_iname_n_found"] = len(intersection_names)
-        st.session_state["edit_turns"] = [
+        _mid_turns = [
             with_name(t, intersection_names.get(t["index"]))
             for t in raw_turns
         ]
+        _s_wpt = {"lat": active_points[0][0],  "lon": active_points[0][1],
+                  "delta": None, "index": 0,                        "name": "スタート"}
+        _g_wpt = {"lat": active_points[-1][0], "lon": active_points[-1][1],
+                  "delta": None, "index": len(active_points) - 1,   "name": "ゴール"}
+        st.session_state["edit_turns"] = [_s_wpt] + _mid_turns + [_g_wpt]
 
 current_turns = st.session_state["edit_turns"]
+if "acpts" not in st.session_state:
+    if len(current_turns) >= 2:
+        _s_wpt, _g_wpt = current_turns[0], current_turns[-1]
+        st.session_state["acpts"] = [
+            {"lat": _s_wpt["lat"], "lng": _s_wpt["lon"], "trkpt_idx": _s_wpt["index"]},
+            {"lat": _g_wpt["lat"], "lng": _g_wpt["lon"], "trkpt_idx": _g_wpt["index"]},
+        ]
+    else:
+        st.session_state["acpts"] = []
+current_acpts = st.session_state["acpts"]
 
 if _has_wpts:
     st.info("📂 GPX内のターンポイントを読み込みました。マップマッチング・標高補正はスキップされています。")
@@ -929,52 +952,93 @@ pending = st.session_state.get("pending_wpt")
 with col_map:
     st.subheader("🗺️ 地図プレビュー")
     _saved_center = st.session_state.get("_map_center")
-    _map_init_loc = ([_saved_center["lat"], _saved_center["lng"]] if _saved_center
-                     else active_points[len(active_points)//4])
-    _map_init_zoom = st.session_state.get("_map_zoom", 13)
-    m = folium.Map(location=_map_init_loc, zoom_start=_map_init_zoom)
-    folium.PolyLine(active_points, color="#3498db", weight=4, opacity=0.8).add_to(m)
-    folium.Marker(active_points[0],  tooltip="スタート",
-                  icon=folium.Icon(color="green",   icon="play", prefix="fa")).add_to(m)
-    folium.Marker(active_points[-1], tooltip="ゴール",
-                  icon=folium.Icon(color="darkred", icon="flag", prefix="fa")).add_to(m)
-
-    for i, t in enumerate(current_turns):
-        arrow, hex_color = wpt_style(t)
-        delta = t.get("delta")
-        popup_html = (f"<b>wpt:{i+1} {arrow} {t['name']}</b>"
-                      + (f"<br>ターン角: {delta:+.1f}°" if delta is not None else "")
-                      + f"<br>trkpt: {t['index']}")
-        tooltip_str = f"wpt:{i+1} / trkpt:{t['index']} {arrow} {t['name']}"
-        folium.CircleMarker(
-            location=[t["lat"], t["lon"]], radius=9,
-            color=hex_color, fill=True, fill_color=hex_color, fill_opacity=0.9,
-            tooltip=tooltip_str,
-            popup=folium.Popup(popup_html, max_width=200),
-        ).add_to(m)
-
-    if pending and pending.get("is_start_goal"):
-        label = "スタート" if pending["index"] == 0 else "ゴール"
-        folium.Marker(
-            [pending["lat"], pending["lon"]],
-            tooltip=f"{label}地点は追加できません",
-            icon=folium.Icon(color="orange", icon="star", prefix="fa"),
-        ).add_to(m)
-
-    map_data = st_folium(
-        m, height=520, use_container_width=True,
+    if _saved_center:
+        _map_center = _saved_center
+        _force_center = _skip_map_center_save
+    else:
+        _map_center = {
+            "lat": active_points[len(active_points) // 4][0],
+            "lng": active_points[len(active_points) // 4][1],
+        }
+        _force_center = True
+    _map_zoom = st.session_state.get("_map_zoom", 13)
+    _wpts_for_map = [
+        {"lat": t["lat"], "lng": t["lon"], "trkpt_idx": t["index"],
+         "name": t["name"], "color": wpt_style(t)[1]}
+        for t in current_turns
+    ]
+    _map_event = render_map(
+        data={
+            "trkpts": active_points,
+            "acpts": current_acpts,
+            "wpts": _wpts_for_map,
+            "center": _map_center,
+            "zoom": _map_zoom,
+            "force_center": _force_center,
+        },
+        height=520,
         key="gpx_map",
-        center=_map_init_loc,
-        zoom=_map_init_zoom,
-        returned_objects=["last_clicked", "last_object_clicked_tooltip"],
     )
 
-# 地図の表示位置を記憶
-if map_data and not _skip_map_center_save:
-    if map_data.get("center"):
-        st.session_state["_map_center"] = map_data["center"]
-    if map_data.get("zoom") is not None:
-        st.session_state["_map_zoom"] = map_data["zoom"]
+# ── イベント処理 ─────────────────────────────────
+if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.get("_map_event_ts", 0):
+    st.session_state["_map_event_ts"] = _map_event["ts"]
+    if "center" in _map_event:
+        st.session_state["_map_center"] = _map_event["center"]
+    if "zoom" in _map_event:
+        st.session_state["_map_zoom"] = _map_event["zoom"]
+
+    _evt_type = _map_event.get("type")
+
+    if _evt_type == "click_empty" or (
+        _evt_type == "dialog_result" and _map_event.get("action") == "extend"
+    ):
+        _clat, _clng = _map_event["lat"], _map_event["lng"]
+        _acpts = list(st.session_state.get("acpts", []))
+        _cur_pts = list(active_points)
+        _turns = list(st.session_state.get("edit_turns", []))
+
+        # 前の境界点を決定（常にルート末尾。wptは使わない）
+        if _acpts:
+            _prev_pt = (_acpts[-1]["lat"], _acpts[-1]["lng"])
+        elif _cur_pts:
+            _prev_pt = tuple(_cur_pts[-1])
+        else:
+            _prev_pt = None
+
+        if _prev_pt is None:
+            # 1点目クリック: スタートwptを作成してルート計算なし
+            _new_trkpts = [[_clat, _clng]]
+            _new_acpt_idx = 0
+            st.session_state["edit_turns"] = [
+                {"lat": _clat, "lon": _clng, "delta": None, "index": 0, "name": "スタート"}
+            ]
+        else:
+            st.session_state["_undo_state"] = {
+                "acpts": list(_acpts),
+                "active_points": list(_cur_pts),
+                "edit_turns": list(_turns),
+            }
+            _seg = calc_route_segment([_prev_pt, (_clat, _clng)])
+            _new_trkpts = _cur_pts + [list(p) for p in _seg[1:]]
+            _new_acpt_idx = len(_new_trkpts) - 1
+
+            # 旧ゴールを wpt リストから外す（acpt としては acpts に残る）
+            if _turns and _turns[-1].get("name") == "ゴール":
+                _turns = _turns[:-1]
+
+            # 新ゴールを wpt 末尾・acpt 末尾に追加
+            _g_wpt = {"lat": _clat, "lon": _clng, "delta": None,
+                      "index": _new_acpt_idx, "name": "ゴール"}
+            _turns = _turns + [_g_wpt]
+            st.session_state["edit_turns"] = _turns
+
+        _acpts.append({"lat": _clat, "lng": _clng, "trkpt_idx": _new_acpt_idx})
+        st.session_state["acpts"] = _acpts
+        st.session_state["_active_points_edit"] = _new_trkpts
+        st.session_state["route_modified"] = True
+        st.session_state["_skip_map_center_save"] = True
+        st.rerun()
 
 # 手動編集した名前を edit_turns に同期（rerun で widget state が消える前に保持）
 for _sync_t in st.session_state.get("edit_turns", []):
@@ -982,88 +1046,26 @@ for _sync_t in st.session_state.get("edit_turns", []):
     if _sync_key in st.session_state:
         _sync_t["name"] = st.session_state[_sync_key]
 
-# ─── マップクリック → pending_wpt 更新 ─────────
-if map_data:
-    tooltip_val = map_data.get("last_object_clicked_tooltip") or ""
-
-    if tooltip_val.startswith("wpt:") and tooltip_val != st.session_state.get("_handled_tooltip"):
-        st.session_state["_handled_tooltip"] = tooltip_val
-        trkpt_idx = int(tooltip_val.split(" / trkpt:")[1].split(" ")[0])
-        if map_data.get("last_clicked"):
-            click = map_data["last_clicked"]
-            st.session_state["_handled_click"] = (round(click["lat"], 7), round(click["lng"], 7))
-        _focus_idx = next(
-            (j for j, t in enumerate(current_turns) if t["index"] == trkpt_idx),
-            None,
-        )
-        if _focus_idx is not None:
-            st.session_state["_focus_wpt_idx"] = _focus_idx
-        st.session_state.pop("pending_wpt", None)
-        st.session_state["_skip_map_center_save"] = True
-        st.rerun()
-
-    elif map_data.get("last_clicked"):
-        click     = map_data["last_clicked"]
-        click_key = (round(click["lat"], 7), round(click["lng"], 7))
-        if click_key != st.session_state.get("_handled_click"):
-            idx = nearest_trkpt_index(click["lat"], click["lng"], active_points)
-            existing_idx = next(
-                (j for j, t in enumerate(current_turns) if t["index"] == idx),
-                None,
-            )
-            if existing_idx is not None:
-                st.session_state["_focus_wpt_idx"] = existing_idx
-                st.session_state.pop("pending_wpt", None)
-            elif idx == 0 or idx == len(active_points) - 1:
-                st.session_state["pending_wpt"] = {
-                    "index": idx,
-                    "lat":   active_points[idx][0],
-                    "lon":   active_points[idx][1],
-                    "is_start_goal": True,
-                }
-            else:
-                sm = 1
-                if sm <= idx < len(active_points) - sm:
-                    b_in  = calculate_bearing(
-                        active_points[idx - sm][0], active_points[idx - sm][1],
-                        active_points[idx][0],      active_points[idx][1],
-                    )
-                    b_out = calculate_bearing(
-                        active_points[idx][0],      active_points[idx][1],
-                        active_points[idx + sm][0], active_points[idx + sm][1],
-                    )
-                    wpt_delta = angle_diff(b_in, b_out)
-                else:
-                    wpt_delta = None
-                _temp = {
-                    "lat":   active_points[idx][0],
-                    "lon":   active_points[idx][1],
-                    "delta": wpt_delta,
-                    "index": idx,
-                }
-                _inames = fetch_intersection_names([_temp], radius=20)
-                _iname = _inames.get(idx)
-                if wpt_delta is not None:
-                    wpt_name = with_name(_temp, _iname)["name"]
-                elif _iname:
-                    wpt_name = _iname
-                else:
-                    _spot = fetch_spot_name(active_points[idx][0], active_points[idx][1], radius=20)
-                    wpt_name = f"「{_spot}」" if _spot else "追加したターンポイント"
-                turns_list = st.session_state["edit_turns"]
-                insert_at = next(
-                    (j for j, t in enumerate(turns_list) if t["index"] > idx),
-                    len(turns_list),
-                )
-                turns_list.insert(insert_at, {**_temp, "name": wpt_name})
-                st.session_state.pop("pending_wpt", None)
-            st.session_state["_handled_click"] = click_key
-            st.session_state["_skip_map_center_save"] = True
-            st.rerun()
 
 # ─── 右パネル（リスト） ───────────────────────
 with col_list:
     st.subheader(f"📋 ターンポイント一覧　({len(current_turns)}件)")
+
+    _wpt_detect_col, _ = st.columns([2, 1])
+    with _wpt_detect_col:
+        if st.button("🔍 wpt検出", use_container_width=True,
+                     help="ルート上のターンを検出してナビ案内点を設定します"):
+            _raw = detect_turns(list(active_points), min_turn_angle=45, min_dist=100, smooth=1)
+            _inames = fetch_intersection_names(_raw)
+            _mid = [with_name(t, _inames.get(t["index"])) for t in _raw]
+            _s_wpt = current_turns[0]
+            _g_wpt = current_turns[-1]
+            st.session_state["edit_turns"] = [_s_wpt] + _mid + [_g_wpt]
+            st.session_state["route_modified"] = False
+            st.rerun()
+    if st.session_state.get("route_modified"):
+        st.warning("ルートが変更されています。wpt検出を実行してください。", icon="⚠️")
+
     st.markdown("""<style>
     [data-testid="stButton"] button {
         font-size: 0.72rem !important;

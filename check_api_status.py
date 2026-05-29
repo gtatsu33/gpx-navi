@@ -6,6 +6,7 @@ Valhalla / 国土地理院 サービス状態チェッカー
 
 import sys
 import time
+import urllib.parse
 import requests
 
 # Windows cp932 ターミナル対応
@@ -15,6 +16,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() in ("cp932", "mbcs"):
 VALHALLA_BASE = "https://valhalla1.openstreetmap.de"
 VALHALLA_URL  = VALHALLA_BASE + "/trace_attributes"
 GSI_URL       = "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php"
+OVERPASS_URLS = [
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://z.overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+# 新宿西口交差点付近（traffic_signals + name タグ持ちノードが多い）
+OVERPASS_QUERY = (
+    "[out:json][timeout:15];"
+    "node(around:50,35.6896,139.6917)[highway~\"^(traffic_signals|crossing)$\"][name];"
+    "out body 1;"
+)
 
 # テスト用座標（千葉県富津市・浜金谷付近の山中）
 TEST_COORDS = [
@@ -95,6 +107,38 @@ def check_valhalla():
         print(f"  /trace     エラー ({elapsed:.2f}s): {e}  {body}  {verdict(0, error=True)}")
 
 
+def check_overpass():
+    print("\n【Overpass API (交差点名取得)】")
+    payload = "data=" + urllib.parse.quote(OVERPASS_QUERY)
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "GPXTurnDetector/1.0",
+    }
+    for url in OVERPASS_URLS:
+        print(f"  URL: {url}")
+        t0 = time.perf_counter()
+        try:
+            r = requests.post(url, data=payload, headers=headers, timeout=20)
+            elapsed = time.perf_counter() - t0
+            r.raise_for_status()
+            elements = r.json().get("elements", [])
+            names = [e.get("tags", {}).get("name", "") for e in elements if e.get("tags", {}).get("name")]
+            sample = f'  サンプル名="{names[0]}"' if names else "  名前付きノードなし"
+            print(f"  成功  {elapsed:.2f}s  ノード数={len(elements)}{sample}  {verdict(elapsed)}")
+        except requests.exceptions.Timeout:
+            elapsed = time.perf_counter() - t0
+            print(f"  タイムアウト ({elapsed:.1f}s 超)  {verdict(0, timeout=True)}")
+        except Exception as e:
+            elapsed = time.perf_counter() - t0
+            body = ""
+            try:
+                body = e.response.text[:200] if hasattr(e, "response") and e.response else ""
+            except Exception:
+                pass
+            print(f"  エラー ({elapsed:.2f}s): {e}  {body}  {verdict(0, error=True)}")
+        time.sleep(0.5)
+
+
 def check_gsi():
     print("\n【国土地理院 標高API】")
     print(f"  URL: {GSI_URL}")
@@ -138,6 +182,7 @@ if __name__ == "__main__":
 
     check_valhalla()
     check_gsi()
+    check_overpass()
 
     print(f"\n{SEP}")
     print("  チェック完了")
