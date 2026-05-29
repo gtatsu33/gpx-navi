@@ -900,7 +900,7 @@ if _has_wpts:
 dists_all = [haversine(active_points[i][0], active_points[i][1],
                        active_points[i+1][0], active_points[i+1][1])
              for i in range(len(active_points) - 1)]
-avg_spacing   = np.mean(dists_all)
+avg_spacing   = np.mean(dists_all) if dists_all else 0.0
 total_dist_km = sum(dists_all) / 1000
 route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）")
 
@@ -1150,40 +1150,81 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
                 "active_points": list(_cur_pts),
                 "edit_turns": [dict(t) for t in _turns],
             }
-            if len(_acpts) == 1:
-                st.session_state["acpts"] = []
-                st.session_state["edit_turns"] = []
-                st.session_state["_active_points_edit"] = []
-            elif _ai == 0:
-                _new_s   = _acpts[1]
-                _off     = _new_s["trkpt_idx"]
-                _new_trkpts = _cur_pts[_off:]
-                _new_acpts  = [dict(a) for a in _acpts[1:]]
-                for a in _new_acpts:
-                    a["trkpt_idx"] -= _off
-                _new_turns = []
-                for t in _turns:
-                    if t.get("index", 0) < _off or t.get("name") == "スタート":
-                        continue
-                    tc = dict(t); tc["index"] -= _off
-                    _new_turns.append(tc)
-                _new_turns.insert(0, {"lat": _new_s["lat"], "lon": _new_s["lng"],
-                                      "delta": None, "index": 0, "name": "スタート"})
-                st.session_state["acpts"] = _new_acpts
-                st.session_state["edit_turns"] = _new_turns
-                st.session_state["_active_points_edit"] = _new_trkpts
+            if _ai == 0:
+                _old_s_idx    = _acpts[0]["trkpt_idx"]
+                _acpts_remain = _acpts[1:]
+                _turns_excl_s = [t for t in _turns if t.get("name") != "スタート"]
+                _n            = len(_cur_pts)
+                _has_next = (
+                    any(a["trkpt_idx"] > _old_s_idx for a in _acpts_remain) or
+                    any(t.get("index", 0) > _old_s_idx for t in _turns_excl_s)
+                )
+                if not _has_next:
+                    st.session_state["acpts"] = []
+                    st.session_state["edit_turns"] = []
+                    st.session_state["_active_points_edit"] = []
+                else:
+                    _off = _adj_idx(_old_s_idx, _acpts_remain, _turns_excl_s, _n, 1)
+                    _boundary_is_acpt = any(a["trkpt_idx"] == _off for a in _acpts_remain)
+                    _new_trkpts = _cur_pts[_off:]
+                    _new_acpts  = [dict(a) for a in _acpts_remain]
+                    for a in _new_acpts:
+                        a["trkpt_idx"] -= _off
+                    _new_turns = []
+                    for t in _turns:
+                        if t.get("index", 0) <= _off or t.get("name") == "スタート":
+                            continue
+                        tc = dict(t); tc["index"] -= _off
+                        _new_turns.append(tc)
+                    if _boundary_is_acpt:
+                        _ns = next(a for a in _new_acpts if a["trkpt_idx"] == 0)
+                        _new_turns.insert(0, {"lat": _ns["lat"], "lon": _ns["lng"],
+                                              "delta": None, "index": 0, "name": "スタート"})
+                    else:
+                        _wpt_ns = next((t for t in _turns if t.get("index") == _off), None)
+                        _ns_lat = _wpt_ns["lat"] if _wpt_ns else float(_cur_pts[_off][0])
+                        _ns_lon = _wpt_ns["lon"] if _wpt_ns else float(_cur_pts[_off][1])
+                        _new_turns.insert(0, {"lat": _ns_lat, "lon": _ns_lon,
+                                              "delta": None, "index": 0, "name": "スタート"})
+                        _new_acpts.insert(0, {"lat": _ns_lat, "lng": _ns_lon, "trkpt_idx": 0})
+                    st.session_state["acpts"] = _new_acpts
+                    st.session_state["edit_turns"] = _new_turns
+                    st.session_state["_active_points_edit"] = _new_trkpts
             elif _ai == len(_acpts) - 1:
-                _new_g     = _acpts[-2]
-                _new_g_idx = _new_g["trkpt_idx"]
-                _new_trkpts = _cur_pts[:_new_g_idx + 1]
-                _new_acpts  = [dict(a) for a in _acpts[:-1]]
-                _new_turns  = [t for t in _turns
-                               if t.get("index", 0) <= _new_g_idx and t.get("name") != "ゴール"]
-                _new_turns.append({"lat": _new_g["lat"], "lon": _new_g["lng"],
-                                   "delta": None, "index": _new_g_idx, "name": "ゴール"})
-                st.session_state["acpts"] = _new_acpts
-                st.session_state["edit_turns"] = _new_turns
-                st.session_state["_active_points_edit"] = _new_trkpts
+                _old_g_idx    = _acpts[-1]["trkpt_idx"]
+                _acpts_remain = _acpts[:-1]
+                _turns_excl_g = [t for t in _turns if t.get("name") != "ゴール"]
+                _n            = len(_cur_pts)
+                _has_prev = (
+                    any(a["trkpt_idx"] < _old_g_idx for a in _acpts_remain) or
+                    any(t.get("index", _n) < _old_g_idx for t in _turns_excl_g)
+                )
+                if not _has_prev:
+                    st.session_state["acpts"] = []
+                    st.session_state["edit_turns"] = []
+                    st.session_state["_active_points_edit"] = []
+                else:
+                    _new_g_bdry   = _adj_idx(_old_g_idx, _acpts_remain, _turns_excl_g, _n, -1)
+                    _boundary_is_acpt = any(a["trkpt_idx"] == _new_g_bdry for a in _acpts_remain)
+                    _new_trkpts = _cur_pts[:_new_g_bdry + 1]
+                    _new_acpts  = [dict(a) for a in _acpts_remain]
+                    _new_turns  = [t for t in _turns
+                                   if t.get("index", 0) < _new_g_bdry and t.get("name") != "ゴール"]
+                    if _boundary_is_acpt:
+                        _ng = next(a for a in _new_acpts if a["trkpt_idx"] == _new_g_bdry)
+                        _new_turns.append({"lat": _ng["lat"], "lon": _ng["lng"],
+                                           "delta": None, "index": _new_g_bdry, "name": "ゴール"})
+                    else:
+                        _wpt_ng = next((t for t in _turns if t.get("index") == _new_g_bdry), None)
+                        _ng_lat = _wpt_ng["lat"] if _wpt_ng else float(_cur_pts[_new_g_bdry][0])
+                        _ng_lon = _wpt_ng["lon"] if _wpt_ng else float(_cur_pts[_new_g_bdry][1])
+                        _new_turns.append({"lat": _ng_lat, "lon": _ng_lon,
+                                           "delta": None, "index": _new_g_bdry, "name": "ゴール"})
+                        _new_acpts.append({"lat": _ng_lat, "lng": _ng_lon, "trkpt_idx": _new_g_bdry})
+                        _new_acpts.sort(key=lambda a: a["trkpt_idx"])
+                    st.session_state["acpts"] = _new_acpts
+                    st.session_state["edit_turns"] = _new_turns
+                    st.session_state["_active_points_edit"] = _new_trkpts
             else:
                 _old_idx  = _acpts[_ai]["trkpt_idx"]
                 _prev_idx = _adj_idx(_old_idx, _acpts, _turns, len(_cur_pts), -1)
@@ -1355,7 +1396,7 @@ with col_list:
             with col_c:
                 if st.button(
                     f"{i+1} | {arrow} | trkpt: {_tidx}",
-                    key=f"center_{_tidx}",
+                    key=f"center_{i}",
                     use_container_width=True,
                     help="地図を移動",
                 ):
@@ -1373,7 +1414,7 @@ with col_list:
                     label_visibility="collapsed",
                 )
             with col_d:
-                if st.button("🗑", key=f"del_{t['index']}", help="削除"):
+                if st.button("🗑", key=f"del_{i}", help="削除"):
                     st.session_state["edit_turns"].pop(i)
                     st.session_state.pop("pending_wpt", None)
                     st.rerun()
