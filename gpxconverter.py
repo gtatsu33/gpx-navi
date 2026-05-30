@@ -20,7 +20,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 
+APP_VERSION = "2.0.0"
+
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
+st.markdown(f"""
+<style>
+.version-badge {{
+    position: fixed;
+    top: 14px;
+    right: 16px;
+    font-size: 11px;
+    color: #9ca3af;
+    z-index: 999999;
+    pointer-events: none;
+}}
+</style>
+<div class="version-badge">v{APP_VERSION}</div>
+""", unsafe_allow_html=True)
 st.title("🚴 gpx-navi エディター")
 st.caption("ルートの作成・編集とナビ用ターンポイントの追加ができます")
 
