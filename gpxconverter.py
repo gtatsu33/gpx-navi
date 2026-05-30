@@ -512,7 +512,7 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
     if gpx_content_str:
         enhanced = gpxpy.parse(gpx_content_str)
     else:
-        enhanced = gpxpy.GPX()
+        enhanced = gpxpy.gpx.GPX()
         track = gpxpy.gpx.GPXTrack()
         seg   = gpxpy.gpx.GPXTrackSegment()
         for pt in (matched_points or []):
@@ -1666,7 +1666,7 @@ if st.session_state.get("_confirm_no_elev"):
 
 # route_modified 警告ダイアログ
 elif st.session_state.get("_confirm_generate"):
-    st.warning("⚠️ 標高が含まれていないルート上の点があります。標高補正を行うことをお勧めします。")
+    st.warning("⚠️ 出力前にターンポイントの検出・編集を行うことをお勧めします。")
     _cg1, _cg2, _ = st.columns([1, 1, 2])
     with _cg1:
         if st.button("✅ 続行", type="primary"):
