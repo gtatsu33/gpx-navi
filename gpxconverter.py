@@ -549,7 +549,7 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
 # ─────────────────────────────────────────────
 
 _STATE_KEYS = [
-    "edit_turns", "pending_wpt", "_handled_click", "_handled_tooltip",
+    "edit_turns",
     "_map_center", "_map_zoom",
     "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
@@ -1068,8 +1068,6 @@ c3.metric("獲得標高", _gain_str)
 
 
 col_map, col_list = st.columns([2, 1])
-pending = st.session_state.get("pending_wpt")
-
 with col_map:
     st.subheader("🗺️ 地図プレビュー")
     _saved_center = st.session_state.get("_map_center")
@@ -1423,8 +1421,25 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
         _cur_pts  = list(active_points)
         _turns    = list(st.session_state.get("edit_turns", []))
         if not any(t.get("index") == _near_idx for t in _turns):
-            _new_wpt = {"lat": _cur_pts[_near_idx][0], "lon": _cur_pts[_near_idx][1],
-                        "delta": None, "index": _near_idx, "name": "経由地"}
+            if 1 <= _near_idx < len(_cur_pts) - 1:
+                _bi = calculate_bearing(_cur_pts[_near_idx-1][0], _cur_pts[_near_idx-1][1],
+                                        _cur_pts[_near_idx][0],   _cur_pts[_near_idx][1])
+                _bo = calculate_bearing(_cur_pts[_near_idx][0],   _cur_pts[_near_idx][1],
+                                        _cur_pts[_near_idx+1][0], _cur_pts[_near_idx+1][1])
+                _delta = angle_diff(_bi, _bo)
+            else:
+                _delta = None
+            _tmp = {"lat": _cur_pts[_near_idx][0], "lon": _cur_pts[_near_idx][1],
+                    "delta": _delta, "index": _near_idx}
+            _inames = fetch_intersection_names([_tmp], radius=20)
+            _iname  = _inames.get(_near_idx)
+            if _delta is not None:
+                _new_wpt = with_name(_tmp, _iname)
+            elif _iname:
+                _new_wpt = {**_tmp, "name": _iname}
+            else:
+                _spot = fetch_spot_name(_tmp["lat"], _tmp["lon"], radius=20)
+                _new_wpt = {**_tmp, "name": f"「{_spot}」" if _spot else "追加したターンポイント"}
             st.session_state["edit_turns"] = sorted(_turns + [_new_wpt], key=lambda t: t["index"])
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
@@ -1494,7 +1509,7 @@ with col_list:
     </style>""", unsafe_allow_html=True)
 
     with st.container(height=520):
-        if not current_turns and not pending:
+        if not current_turns:
             st.info("ターンポイントがありません。")
 
         for i, t in enumerate(current_turns):
@@ -1526,13 +1541,7 @@ with col_list:
             with col_d:
                 if st.button("🗑", key=f"del_{i}", help="削除"):
                     st.session_state["edit_turns"].pop(i)
-                    st.session_state.pop("pending_wpt", None)
                     st.rerun()
-
-        if pending and pending.get("is_start_goal"):
-            st.divider()
-            label = "スタート" if pending["index"] == 0 else "ゴール"
-            st.error(f"{label}地点は追加できません")
 
         _focus_wpt_idx = st.session_state.pop("_focus_wpt_idx", None)
         if _focus_wpt_idx is not None:
