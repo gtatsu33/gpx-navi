@@ -18,6 +18,7 @@ import urllib.parse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
+from rdp import rdp as rdp_simplify
 
 st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
 st.title("🚴 GPX ターン検出・強化ツール")
@@ -508,7 +509,16 @@ def compute_grade_stats(points, elevations):
 # ─────────────────────────────────────────────
 
 def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=None):
-    enhanced = gpxpy.parse(gpx_content_str)
+    if gpx_content_str:
+        enhanced = gpxpy.parse(gpx_content_str)
+    else:
+        enhanced = gpxpy.GPX()
+        track = gpxpy.gpx.GPXTrack()
+        seg   = gpxpy.gpx.GPXTrackSegment()
+        for pt in (matched_points or []):
+            seg.points.append(gpxpy.gpx.GPXTrackPoint(pt[0], pt[1]))
+        track.segments.append(seg)
+        enhanced.tracks.append(track)
 
     # trkpt の座標・標高を更新
     all_pts = [pt for tr in enhanced.tracks
@@ -535,35 +545,9 @@ def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=N
     return enhanced.to_xml()
 
 # ─────────────────────────────────────────────
-# ファイルアップロード
+# ファイルアップロード / 新規ルートモード
 # ─────────────────────────────────────────────
 
-uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
-
-if uploaded is None:
-    st.info("GPXファイルをアップロードしてください（Stravaなどのルートエクスポートが対象）")
-    st.stop()
-
-raw_content = uploaded.read().decode("utf-8")
-try:
-    gpx_parsed = gpxpy.parse(raw_content)
-except Exception as e:
-    st.error(f"GPXの解析に失敗しました: {e}")
-    st.stop()
-
-points = []
-for track in gpx_parsed.tracks:
-    for segment in track.segments:
-        for pt in segment.points:
-            points.append((pt.latitude, pt.longitude))
-
-if len(points) < 6:
-    st.error("トラックポイントが少なすぎます。")
-    st.stop()
-
-_has_wpts = len(gpx_parsed.waypoints) > 0
-
-# ファイルが変わったらセッション状態をリセット
 _STATE_KEYS = [
     "edit_turns", "pending_wpt", "_handled_click", "_handled_tooltip",
     "_map_center", "_map_zoom",
@@ -580,24 +564,84 @@ _STATE_KEYS = [
     "_undo_state",
     "route_modified",
     "_confirm_generate",
+    "_rdp_done",
+    "_confirm_no_elev",
+    "_auto_generate_after_elev",
 ]
-if st.session_state.get("_file_name") != uploaded.name:
-    st.session_state["_file_name"] = uploaded.name
-    for k in _STATE_KEYS:
-        st.session_state.pop(k, None)
+
+_is_actual_ride = st.checkbox(
+    "実走行データ（マップマッチング・間引きを行う）",
+    key="_is_actual_ride_cb",
+    help="GPSデバイスやStravaの実走記録の場合はチェックしてください。ルート作成データはチェック不要です。",
+)
+
+uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
+
+if uploaded is None and not st.session_state.get("_new_route_mode"):
+    st.info("GPXファイルをアップロードするか、新規ルートを作成してください。")
+    if st.button("🗺️ 新規ルートを作成する"):
+        for k in _STATE_KEYS:
+            st.session_state.pop(k, None)
+        st.session_state.pop("_file_key", None)
+        st.session_state["_new_route_mode"] = True
+        st.rerun()
+    st.stop()
+
+# GPXファイルがアップロードされたら新規ルートモードを解除
+if uploaded is not None and st.session_state.get("_new_route_mode"):
+    st.session_state["_new_route_mode"] = False
+
+raw_content = None
+points = []
+gpx_parsed = None
+_has_wpts = False
+
+if uploaded is not None:
+    raw_content = uploaded.read().decode("utf-8")
+    try:
+        gpx_parsed = gpxpy.parse(raw_content)
+    except Exception as e:
+        st.error(f"GPXの解析に失敗しました: {e}")
+        st.stop()
+
+    for track in gpx_parsed.tracks:
+        for segment in track.segments:
+            for pt in segment.points:
+                points.append((pt.latitude, pt.longitude))
+
+    if len(points) < 6:
+        st.error("トラックポイントが少なすぎます。")
+        st.stop()
+
+    _has_wpts = len(gpx_parsed.waypoints) > 0
+
+    # ファイルまたは実走行チェックが変わったらリセット
+    _file_key = f"{uploaded.name}_{_is_actual_ride}"
+    if st.session_state.get("_file_key") != _file_key:
+        st.session_state["_file_key"] = _file_key
+        for k in _STATE_KEYS:
+            st.session_state.pop(k, None)
 
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 
 # ─────────────────────────────────────────────
 # 自動処理（マップマッチング・標高補正）
 # ─────────────────────────────────────────────
+
+if st.session_state.get("_new_route_mode"):
+    st.session_state.setdefault("_mm_status", "スキップ")
+    st.session_state.setdefault("_matched_points", [])
+    st.session_state.setdefault("_proc_status", "done")
+
 _needs_rerun = False
 
 if st.session_state.get("_mm_status") is None:
-    if _has_wpts:
+    if not _is_actual_ride:
+        # ルートデータ：マップマッチングスキップ
         st.session_state["_matched_points"] = list(points)
         st.session_state["_mm_status"]      = "スキップ"
     else:
+        # 実走行データ：マップマッチング実行
         st.session_state["_mm_status"]              = "running"
         st.session_state["_mm_chunk_idx"]           = 0
         st.session_state["_mm_matched_partial"]     = list(points)
@@ -688,8 +732,18 @@ active_points = st.session_state.get("_matched_points", points)
 if "_active_points_edit" in st.session_state:
     active_points = st.session_state["_active_points_edit"]
 
+# 実走行データ：マップマッチング完了後にRDP間引き（1回のみ）
+if _is_actual_ride and not st.session_state.get("_rdp_done"):
+    _mm_st = st.session_state.get("_mm_status")
+    if _mm_st in ("完了", "キャンセル", "スキップ") and st.session_state.get("_matched_points"):
+        _rdp_pts = st.session_state["_matched_points"]
+        _thinned = rdp_simplify([[p[0], p[1]] for p in _rdp_pts], epsilon=5.0)
+        st.session_state["_matched_points"] = [tuple(p) for p in _thinned]
+        st.session_state["_rdp_done"] = True
+        active_points = st.session_state["_matched_points"]
+
 # ─────────────────────────────────────────────
-# 標高処理（org: 元GPX＋スパイク補正 / fix: GSI＋スパイク補正）
+# 標高処理（org: 元GPX＋スパイク補正 / fix: GSI手動補正）
 # ─────────────────────────────────────────────
 
 def _set_default_elev_choice():
@@ -702,28 +756,25 @@ def _set_default_elev_choice():
     st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
 
 if st.session_state.get("_proc_status") is None:
-    # trkpt_org: 元GPX ele値 + スパイク補正
-    _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
-                   for seg in tr.segments for p in seg.points]
-    if all(e is None for e in _orig_elevs):
+    # trkpt_org: 元GPX ele値 + スパイク補正（新規ルートモードはスキップ）
+    if gpx_parsed is not None:
+        _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
+                       for seg in tr.segments for p in seg.points]
+        if all(e is None for e in _orig_elevs):
+            st.session_state["_trkpt_org_elevs"] = None
+            st.session_state["_grade_org"]       = None
+        else:
+            _org_cleaned, _ = clean_elevation_spikes(active_points, _orig_elevs)
+            st.session_state["_trkpt_org_elevs"] = _org_cleaned
+            st.session_state["_grade_org"]       = compute_grade_stats(active_points, _org_cleaned)
+    else:
         st.session_state["_trkpt_org_elevs"] = None
         st.session_state["_grade_org"]       = None
-    else:
-        _org_cleaned, _ = clean_elevation_spikes(active_points, _orig_elevs)
-        st.session_state["_trkpt_org_elevs"] = _org_cleaned
-        st.session_state["_grade_org"]       = compute_grade_stats(active_points, _org_cleaned)
 
-    # trkpt_fix: GSI標高取得 → スパイク補正
-    if _has_wpts or not (active_points and _is_in_japan(active_points[0][0], active_points[0][1])):
-        st.session_state["_trkpt_fix_elevs"] = None
-        st.session_state["_grade_fix"]       = None
-        st.session_state["_proc_status"]     = "done"
-        _set_default_elev_choice()
-    else:
-        st.session_state["_proc_status"]    = "running_fix"
-        st.session_state["_elev_batch_idx"] = 0
-        st.session_state["_elev_partial"]   = [None] * len(active_points)
-        st.rerun()
+    # GSI標高補正は手動ボタンで実行（自動実行しない）
+    st.session_state["_trkpt_fix_elevs"] = None
+    st.session_state["_grade_fix"]       = None
+    st.session_state["_proc_status"]     = "done"
 
 # GSI標高取得ループ（1 rerun = 1 バッチ）
 if st.session_state.get("_proc_status") == "running_fix":
@@ -763,6 +814,8 @@ if st.session_state.get("_proc_status") == "running_fix":
             _fix_cleaned, _ = clean_elevation_spikes(active_points, gsi_elevs)
             st.session_state["_trkpt_fix_elevs"] = _fix_cleaned
             st.session_state["_grade_fix"]       = compute_grade_stats(active_points, _fix_cleaned)
+            if st.session_state.get("_grade_org") is None:
+                st.session_state["_elev_choice"] = "fix"
         for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
             st.session_state.pop(_ek, None)
         st.session_state["_proc_status"] = "done"
@@ -846,7 +899,9 @@ if _needs_rerun:
 
 # ─── ターン初期化（初回のみ）──────────────────
 if "edit_turns" not in st.session_state:
-    if _has_wpts:
+    if st.session_state.get("_new_route_mode"):
+        st.session_state["edit_turns"] = []
+    elif _has_wpts and not _is_actual_ride:
         turns = []
         for wpt in gpx_parsed.waypoints:
             delta = None
@@ -902,57 +957,13 @@ dists_all = [haversine(active_points[i][0], active_points[i][1],
              for i in range(len(active_points) - 1)]
 avg_spacing   = np.mean(dists_all) if dists_all else 0.0
 total_dist_km = sum(dists_all) / 1000
-route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）")
+route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）") if gpx_parsed else "新規ルート"
 
 c1, c2, c3 = st.columns(3)
 c1.metric("ルート名", route_name)
 c2.metric("総距離", f"{total_dist_km:.1f} km")
 c3.metric("GPSポイント間隔（平均）", f"{avg_spacing:.0f} m")
 
-# ─────────────────────────────────────────────
-# 標高データ選択UI
-# ─────────────────────────────────────────────
-if st.session_state.get("_proc_status") == "done":
-    _go = st.session_state.get("_grade_org")
-    _gf = st.session_state.get("_grade_fix")
-
-    if _go is not None or _gf is not None:
-        st.divider()
-        _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
-        _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
-        _rec = "fix" if _sf < _so else "org"
-
-        def _grade_label(key, grade):
-            name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
-            if grade is None:
-                return f"{name}　—— データなし"
-            star = "　★推奨" if key == _rec else ""
-            return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
-
-        _options = ["org", "fix"]
-        _labels  = [_grade_label("org", _go), _grade_label("fix", _gf)]
-
-        _cur = st.session_state.get("_elev_choice", _rec)
-        if _cur == "org" and _go is None:
-            _cur = "fix"
-        elif _cur == "fix" and _gf is None:
-            _cur = "org"
-
-        _sel = st.radio(
-            "⛰️ 標高データ選択",
-            _labels,
-            index=_options.index(_cur),
-        )
-        _chosen = _options[_labels.index(_sel)]
-        if _chosen == "org" and _go is None:
-            _chosen = "fix"
-        elif _chosen == "fix" and _gf is None:
-            _chosen = "org"
-        if _chosen != _cur:
-            st.session_state["_elev_choice"] = _chosen
-            st.rerun()
-        else:
-            st.session_state["_elev_choice"] = _chosen
 
 # ─────────────────────────────────────────────
 # 地図 + リストパネル
@@ -969,11 +980,14 @@ with col_map:
     if _saved_center:
         _map_center = _saved_center
         _force_center = _skip_map_center_save
-    else:
+    elif active_points:
         _map_center = {
             "lat": active_points[len(active_points) // 4][0],
             "lng": active_points[len(active_points) // 4][1],
         }
+        _force_center = True
+    else:
+        _map_center = {"lat": 35.681, "lng": 139.767}  # デフォルト（東京）
         _force_center = True
     _map_zoom = st.session_state.get("_map_zoom", 13)
     _wpts_for_map = [
@@ -1449,10 +1463,73 @@ with col_list:
 st.divider()
 st.subheader("💾 強化GPXの出力")
 
+# ── 標高補正（手動）──────────────────────────────
+if st.session_state.get("_proc_status") == "running_fix":
+    st.info("⛰️ 国土地理院で標高補正中…（画面上部の進捗を確認してください）")
+else:
+    _col_gsi, _col_gsi_info = st.columns([1, 3])
+    with _col_gsi:
+        _gsi_disabled = not (active_points and _is_in_japan(active_points[0][0], active_points[0][1]))
+        if st.button("⛰️ 国土地理院で標高補正", disabled=_gsi_disabled,
+                     help="日本国内のルートのみ対応。実行後にGSI補正データを選択できます。"):
+            st.session_state["_proc_status"]    = "running_fix"
+            st.session_state["_elev_batch_idx"] = 0
+            st.session_state["_elev_partial"]   = [None] * len(active_points)
+            st.session_state.pop("_trkpt_fix_elevs", None)
+            st.session_state.pop("_grade_fix", None)
+            st.rerun()
+    with _col_gsi_info:
+        if st.session_state.get("_trkpt_fix_elevs") is not None:
+            _gf = st.session_state.get("_grade_fix")
+            if _gf:
+                st.success(f"✅ GSI補正済み　上り {_gf['max']:+.1f}%  下り {_gf['min']:+.1f}%")
+        elif not _gsi_disabled:
+            st.caption("ボタンを押すと全trkptの標高をGSIサーバーから取得します。")
+
+# ── 標高データ選択 ───────────────────────────────
+_go = st.session_state.get("_grade_org")
+_gf = st.session_state.get("_grade_fix")
+if st.session_state.get("_proc_status") == "done" and active_points:
+    _gsi_done = st.session_state.get("_trkpt_fix_elevs") is not None
+    _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+    _sf = (_gf["max"] + abs(_gf["min"])) if (_gf and _gsi_done) else float("inf")
+    _rec = "fix" if (_gsi_done and _sf < _so) else "org"
+
+    def _grade_label(key, grade):
+        if key == "fix" and not _gsi_done:
+            return "国土地理院補正（実施前）"
+        if key == "org" and grade is None:
+            star = "　★推奨" if not _gsi_done else ""
+            return f"元データ（標高データなし）{star}"
+        name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
+        star = "　★推奨" if key == _rec else ""
+        return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
+
+    _opts = ["org", "fix"]
+    _lbls = [_grade_label("org", _go), _grade_label("fix", _gf)]
+
+    _cur_choice = st.session_state.get("_elev_choice", "org")
+    if _cur_choice == "fix" and not _gsi_done:
+        _cur_choice = "org"
+        st.session_state["_elev_choice"] = "org"
+    _sel = st.radio("標高データ選択", _lbls, index=_opts.index(_cur_choice))
+    _chosen = _opts[_lbls.index(_sel)]
+    if _chosen == "fix" and not _gsi_done:
+        _chosen = "org"
+    if _chosen != _cur_choice:
+        st.session_state["_elev_choice"] = _chosen
+        st.rerun()
+    else:
+        st.session_state["_elev_choice"] = _chosen
+else:
+    st.session_state.setdefault("_elev_choice", "org")
+
+_choice = st.session_state.get("_elev_choice", "org")
+
+# ── 適用済み情報 ─────────────────────────────────
 _applied = []
 if st.session_state.get("_mm_status") == "完了":
     _applied.append("🗺️ マップマッチング済み")
-_choice = st.session_state.get("_elev_choice")
 if _choice == "fix" and st.session_state.get("_trkpt_fix_elevs") is not None:
     _applied.append("⛰️ 標高補正済み（国土地理院）")
 elif _choice == "org" and st.session_state.get("_trkpt_org_elevs") is not None:
@@ -1463,11 +1540,33 @@ if _applied:
 col_dl1, col_dl2, _ = st.columns([1, 1, 2])
 col_dl1.metric("ターンポイント数", len(current_turns))
 
-# route_modified 警告ダイアログ（確認待ち状態）
-if st.session_state.get("_confirm_generate"):
+# 標高補正後の自動生成フラグ処理
+_do_generate = False
+if st.session_state.pop("_auto_generate_after_elev", False):
+    if st.session_state.get("_trkpt_fix_elevs") is not None:
+        _do_generate = True
+
+# 標高データなし警告ダイアログ
+if st.session_state.get("_confirm_no_elev"):
+    st.warning("⚠️ 標高データがありません。国土地理院で標高補正してから出力することをお勧めします。")
+    _cne1, _cne2, _ = st.columns([1, 1, 2])
+    with _cne1:
+        if st.button("⛰️ 補正してから生成", type="primary"):
+            st.session_state["_proc_status"]              = "running_fix"
+            st.session_state["_elev_batch_idx"]           = 0
+            st.session_state["_elev_partial"]             = [None] * len(active_points)
+            st.session_state["_auto_generate_after_elev"] = True
+            st.session_state.pop("_confirm_no_elev", None)
+            st.rerun()
+    with _cne2:
+        if st.button("📥 このまま生成"):
+            st.session_state.pop("_confirm_no_elev", None)
+            _do_generate = True
+
+# route_modified 警告ダイアログ
+elif st.session_state.get("_confirm_generate"):
     st.warning("⚠️ ナビ案内点がルートと一致していない可能性があります。このまま生成しますか？")
     _cg1, _cg2, _ = st.columns([1, 1, 2])
-    _do_generate = False
     with _cg1:
         if st.button("✅ 続行", type="primary"):
             st.session_state.pop("_confirm_generate", None)
@@ -1476,12 +1575,15 @@ if st.session_state.get("_confirm_generate"):
         if st.button("❌ キャンセル"):
             st.session_state.pop("_confirm_generate", None)
             st.rerun()
+
 else:
-    _do_generate = False
     with col_dl2:
         if st.button("📥 強化GPXを生成", type="primary", disabled=(len(current_turns) == 0)):
             if st.session_state.get("route_modified"):
                 st.session_state["_confirm_generate"] = True
+                st.rerun()
+            elif st.session_state.get("_grade_org") is None and st.session_state.get("_trkpt_fix_elevs") is None:
+                st.session_state["_confirm_no_elev"] = True
                 st.rerun()
             else:
                 _do_generate = True
@@ -1501,10 +1603,10 @@ if _do_generate:
     xml_output = build_enhanced_gpx(
         raw_content,
         turns_for_build,
-        matched_points=st.session_state.get("_matched_points"),
+        matched_points=st.session_state.get("_matched_points") or list(active_points),
         elevations=_out_elevs,
     )
-    base_name = uploaded.name.replace(".gpx", "")
+    base_name = (uploaded.name.replace(".gpx", "") if uploaded else "new_route")
     st.download_button(
         label=f"⬇️ {base_name}_turns.gpx をダウンロード",
         data=xml_output,
