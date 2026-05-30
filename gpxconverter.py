@@ -19,8 +19,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
+import plotly.graph_objects as go
 
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.1.0"
 
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
 st.markdown(f'# 🚴 gpx-navi エディター <span style="font-size:0.35em; color:#9ca3af; font-weight:normal; vertical-align:middle;">v{APP_VERSION}</span>', unsafe_allow_html=True)
@@ -47,6 +48,90 @@ def haversine(lat1, lon1, lat2, lon2):
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin((lon2-lon1)/2)**2
     return R * 2 * math.asin(math.sqrt(max(0, a)))
+
+def _render_elevation_profile(active_points, dists_all, org_elevs, fix_elevs, turns):
+    n = len(active_points)
+    if n < 2:
+        return None
+
+    cum_dist = [0.0]
+    for d in dists_all:
+        cum_dist.append(cum_dist[-1] + d / 1000)
+    total_km = cum_dist[-1]
+
+    def _prep(elevs):
+        if not elevs or len(elevs) < n:
+            return None
+        return list(elevs[:n])
+
+    org_e = _prep(org_elevs)
+    fix_e = _prep(fix_elevs)
+
+    all_vals = [v for e in [org_e, fix_e] if e for v in e if v is not None]
+    if all_vals:
+        ele_min, ele_max = min(all_vals), max(all_vals)
+        if ele_min == ele_max:
+            ele_max = ele_min + 1
+    else:
+        ele_min, ele_max = 0, 1
+
+    def _fill(elevs):
+        if elevs is None:
+            return [ele_min] * n
+        return [v if v is not None else ele_min for v in elevs]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=cum_dist, y=_fill(org_e), mode="lines",
+        line=dict(color="black", width=1.5, dash="dot"),
+        name="元データ標高",
+    ))
+    fig.add_trace(go.Scatter(
+        x=cum_dist, y=_fill(fix_e), mode="lines",
+        line=dict(color="black", width=1.5),
+        name="国土地理院補正標高",
+    ))
+
+    if ele_min <= 0 <= ele_max:
+        fig.add_hline(y=0, line_color="gray", line_width=1)
+
+    for t in turns:
+        idx = t.get("index", 0)
+        if 0 <= idx < len(cum_dist):
+            fig.add_vline(x=cum_dist[idx], line_color="rgba(100,100,200,0.5)", line_width=1)
+
+    tick_step = 5 if total_km < 50 else 10
+    tick_vals = list(range(tick_step, int(total_km) + 1, tick_step))
+
+    fig.update_layout(
+        height=150,
+        margin=dict(l=50, r=10, t=5, b=35),
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="top", y=0.99,
+            xanchor="right", x=0.99,
+            font=dict(size=9),
+            bgcolor="rgba(255,255,255,0.7)",
+        ),
+        xaxis=dict(
+            tickmode="array",
+            tickvals=tick_vals,
+            ticktext=[f"{v}km" for v in tick_vals],
+            range=[0, total_km],
+            tickfont=dict(size=9),
+        ),
+        yaxis=dict(
+            range=[ele_min, ele_max],
+            tickformat=".0f",
+            ticksuffix="m",
+            tickfont=dict(size=9),
+            nticks=3,
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    return fig
+
 
 def detect_turns(points, min_turn_angle=45, min_dist=100, smooth=1):
     """
@@ -839,123 +924,6 @@ if st.session_state.get("_proc_status") is None:
     st.session_state["_grade_fix"]       = None
     st.session_state["_proc_status"]     = "done"
 
-# GSI標高取得ループ（1 rerun = 1 バッチ）
-if st.session_state.get("_proc_status") == "running_fix":
-    _en         = len(active_points)
-    _E_BATCH    = 50
-    _en_batches = math.ceil(_en / _E_BATCH)
-    _ebi        = st.session_state.get("_elev_batch_idx", 0)
-    _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
-
-    _ecol_prog, _ecol_btn = st.columns([5, 1])
-    with _ecol_prog:
-        _elev_prog_area = st.empty()
-        _pending_retry = st.session_state.get("_elev_retry_idxs")
-        if _pending_retry:
-            _es_init = _ebi * _E_BATCH
-            _ee_init = min(_es_init + _E_BATCH, _en)
-            _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
-            _elev_prog_area.progress(
-                (_es_init + _n_confirmed) / _en,
-                text=f"⚠️ 国土地理院が遅いです（{len(_pending_retry)}点再試行中）… {_es_init + _n_confirmed}/{_en} 点確定",
-            )
-        else:
-            _elev_prog_area.progress(
-                _ebi / _en_batches,
-                text=f"⛰️ 標高補正中（国土地理院）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
-            )
-    with _ecol_btn:
-        if st.button("⏹ キャンセル", key="elev_cancel_btn"):
-            st.session_state["_elev_cancel_requested"] = True
-            st.rerun()
-
-    def _finalize_fix(gsi_elevs, cancelled=False):
-        if cancelled:
-            st.session_state["_trkpt_fix_elevs"] = None
-            st.session_state["_grade_fix"]       = None
-        else:
-            _fix_cleaned, _ = clean_elevation_spikes(active_points, gsi_elevs)
-            st.session_state["_trkpt_fix_elevs"] = _fix_cleaned
-            st.session_state["_grade_fix"]       = compute_grade_stats(active_points, _fix_cleaned)
-            if st.session_state.get("_grade_org") is None:
-                st.session_state["_elev_choice"] = "fix"
-        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
-            st.session_state.pop(_ek, None)
-        st.session_state["_proc_status"] = "done"
-        _set_default_elev_choice()
-
-    if _ecancelled:
-        _ep = st.session_state.get("_elev_partial", [None] * _en)
-        _finalize_fix(_ep, cancelled=True)
-        _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
-        _needs_rerun = True
-    else:
-        _es = _ebi * _E_BATCH
-        _ee = min(_es + _E_BATCH, _en)
-        _ep = st.session_state.get("_elev_partial", [None] * _en)
-
-        _etls = threading.local()
-        def _efetch(args):
-            _ei, _elat, _elon = args
-            if not hasattr(_etls, "session"):
-                _etls.session = requests.Session()
-            try:
-                _er = _etls.session.get(
-                    "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
-                    params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
-                    timeout=10,
-                )
-                _er.raise_for_status()
-                _ev = _er.json().get("elevation")
-                val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
-                return _ei, val, False
-            except Exception:
-                return _ei, None, True
-        _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
-        _is_retry   = _retry_idxs is not None
-        _etasks = (
-            [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
-            if _is_retry
-            else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
-        )
-        _edone      = [0]
-        _econfirmed = [0]
-        _bar_prev   = [0]
-        _err_idxs   = []
-        with ThreadPoolExecutor(max_workers=10) as _eex:
-            for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
-                _ei2, _ev2, _err = _ef.result()
-                if _err:
-                    _err_idxs.append(_ei2)
-                else:
-                    _ep[_ei2] = _ev2
-                    _econfirmed[0] += 1
-                _edone[0] += 1
-                if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
-                    _bar_prev[0] = _econfirmed[0]
-                    _pts_confirmed = _es + _econfirmed[0]
-                    _elev_prog_area.progress(
-                        _pts_confirmed / _en,
-                        text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
-                    )
-        if _err_idxs:
-            st.session_state["_elev_retry_idxs"] = _err_idxs
-            _n_confirmed = (_ee - _es) - len(_err_idxs)
-            _elev_prog_area.progress(
-                (_es + _n_confirmed) / _en,
-                text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
-            )
-            st.rerun()
-
-        st.session_state["_elev_partial"] = _ep
-
-        if _ebi + 1 >= _en_batches:
-            _finalize_fix(_ep)
-            _elev_prog_area.progress(1.0, text="✅ 標高補正完了")
-            _needs_rerun = True
-        else:
-            st.session_state["_elev_batch_idx"] = _ebi + 1
-            st.rerun()
 
 if _needs_rerun:
     st.rerun()
@@ -1103,6 +1071,15 @@ with col_map:
         height=520,
         key="gpx_map",
     )
+
+    _elev_fig = _render_elevation_profile(
+        active_points, dists_all,
+        st.session_state.get("_trkpt_org_elevs"),
+        st.session_state.get("_trkpt_fix_elevs"),
+        current_turns,
+    )
+    if _elev_fig is not None:
+        st.plotly_chart(_elev_fig, width="stretch", config={"displayModeBar": False})
 
 # ── イベント処理 ─────────────────────────────────
 if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.get("_map_event_ts", 0):
@@ -1584,7 +1561,121 @@ with st.container():
     }
     </style>""", unsafe_allow_html=True)
     if st.session_state.get("_proc_status") == "running_fix":
-        st.info("⛰️ 国土地理院で標高補正中…（画面上部の進捗を確認してください）")
+        _en         = len(active_points)
+        _E_BATCH    = 50
+        _en_batches = math.ceil(_en / _E_BATCH)
+        _ebi        = st.session_state.get("_elev_batch_idx", 0)
+        _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
+
+        _ecol_prog, _ecol_btn = st.columns([5, 1])
+        with _ecol_prog:
+            _elev_prog_area = st.empty()
+            _pending_retry = st.session_state.get("_elev_retry_idxs")
+            if _pending_retry:
+                _es_init = _ebi * _E_BATCH
+                _ee_init = min(_es_init + _E_BATCH, _en)
+                _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
+                _elev_prog_area.progress(
+                    (_es_init + _n_confirmed) / _en,
+                    text=f"⚠️ 国土地理院が遅いです（{len(_pending_retry)}点再試行中）… {_es_init + _n_confirmed}/{_en} 点確定",
+                )
+            else:
+                _elev_prog_area.progress(
+                    _ebi / _en_batches,
+                    text=f"⛰️ 標高補正中（国土地理院）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
+                )
+        with _ecol_btn:
+            if st.button("⏹ キャンセル", key="elev_cancel_btn"):
+                st.session_state["_elev_cancel_requested"] = True
+                st.rerun()
+
+        def _finalize_fix(gsi_elevs, cancelled=False):
+            if cancelled:
+                st.session_state["_trkpt_fix_elevs"] = None
+                st.session_state["_grade_fix"]       = None
+            else:
+                _fix_cleaned, _ = clean_elevation_spikes(active_points, gsi_elevs)
+                st.session_state["_trkpt_fix_elevs"] = _fix_cleaned
+                st.session_state["_grade_fix"]       = compute_grade_stats(active_points, _fix_cleaned)
+                if st.session_state.get("_grade_org") is None:
+                    st.session_state["_elev_choice"] = "fix"
+            for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
+                st.session_state.pop(_ek, None)
+            st.session_state["_proc_status"] = "done"
+            _set_default_elev_choice()
+
+        if _ecancelled:
+            _ep = st.session_state.get("_elev_partial", [None] * _en)
+            _finalize_fix(_ep, cancelled=True)
+            _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
+            st.rerun()
+        else:
+            _es = _ebi * _E_BATCH
+            _ee = min(_es + _E_BATCH, _en)
+            _ep = st.session_state.get("_elev_partial", [None] * _en)
+
+            _etls = threading.local()
+            def _efetch(args):
+                _ei, _elat, _elon = args
+                if not hasattr(_etls, "session"):
+                    _etls.session = requests.Session()
+                try:
+                    _er = _etls.session.get(
+                        "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
+                        params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
+                        timeout=10,
+                    )
+                    _er.raise_for_status()
+                    _ev = _er.json().get("elevation")
+                    val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
+                    return _ei, val, False
+                except Exception:
+                    return _ei, None, True
+
+            _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
+            _is_retry   = _retry_idxs is not None
+            _etasks = (
+                [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
+                if _is_retry
+                else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+            )
+            _edone      = [0]
+            _econfirmed = [0]
+            _bar_prev   = [0]
+            _err_idxs   = []
+            with ThreadPoolExecutor(max_workers=10) as _eex:
+                for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
+                    _ei2, _ev2, _err = _ef.result()
+                    if _err:
+                        _err_idxs.append(_ei2)
+                    else:
+                        _ep[_ei2] = _ev2
+                        _econfirmed[0] += 1
+                    _edone[0] += 1
+                    if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
+                        _bar_prev[0] = _econfirmed[0]
+                        _pts_confirmed = _es + _econfirmed[0]
+                        _elev_prog_area.progress(
+                            _pts_confirmed / _en,
+                            text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
+                        )
+            if _err_idxs:
+                st.session_state["_elev_retry_idxs"] = _err_idxs
+                _n_confirmed = (_ee - _es) - len(_err_idxs)
+                _elev_prog_area.progress(
+                    (_es + _n_confirmed) / _en,
+                    text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
+                )
+                st.rerun()
+
+            st.session_state["_elev_partial"] = _ep
+
+            if _ebi + 1 >= _en_batches:
+                _finalize_fix(_ep)
+                _elev_prog_area.progress(1.0, text="✅ 標高補正完了")
+            else:
+                st.session_state["_elev_batch_idx"] = _ebi + 1
+            st.rerun()
     else:
         _gsi_disabled = not (active_points and _is_in_japan(active_points[0][0], active_points[0][1]))
         _n_pts = len(active_points)
