@@ -20,10 +20,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 
-st.set_page_config(page_title="GPX ターン検出ツール", layout="wide", page_icon="🚴")
-st.title("🚴 GPX ターン検出・強化ツール")
+st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
+st.title("🚴 gpx-navi エディター")
+st.caption("ルートの作成・編集とナビ用ターンポイントの追加ができます")
 
-st.caption("Stravaなどのターン情報なしGPXにナビ用ターンポイントを追加します")
 
 # ─────────────────────────────────────────────
 # ユーティリティ関数
@@ -567,37 +567,97 @@ _STATE_KEYS = [
     "_rdp_done",
     "_confirm_no_elev",
     "_auto_generate_after_elev",
+    "_confirm_back",
+    "_raw_gpx",
+    "_gpx_filename",
 ]
 
-_is_actual_ride = st.checkbox(
-    "実走行データ（マップマッチング・間引きを行う）",
-    key="_is_actual_ride_cb",
-    help="GPSデバイスやStravaの実走記録の場合はチェックしてください。ルート作成データはチェック不要です。",
-)
+# 編集モード判定：ファイル読込済み または 新規ルートモード
+_in_editing = (st.session_state.get("_file_key") is not None
+               or st.session_state.get("_new_route_mode"))
 
-uploaded = st.file_uploader("GPXファイルをアップロード", type=["gpx"])
+if not _in_editing:
+    # ── スタート画面（ファイル未読込・非新規モードのときのみ表示）──
+    st.markdown("""
+<style>
+div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] > div:first-child {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    border: 2px solid #e5e7eb;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    min-height: 340px;
+}
+div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(1) > div:first-child {
+    border-color: #dbeafe;
+}
+div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) > div:first-child {
+    border-color: #d1fae5;
+}
+.feat-list      { list-style: none; padding: 0; margin: 0 0 20px 0; }
+.feat-list li   { font-size: 13px; color: #374151; padding: 5px 0;
+                  border-bottom: 1px solid #f3f4f6; }
+.feat-list li:last-child { border-bottom: none; }
+</style>
+""", unsafe_allow_html=True)
 
-if uploaded is None and not st.session_state.get("_new_route_mode"):
-    st.info("GPXファイルをアップロードするか、新規ルートを作成してください。")
-    if st.button("🗺️ 新規ルートを作成する"):
-        for k in _STATE_KEYS:
-            st.session_state.pop(k, None)
-        st.session_state.pop("_file_key", None)
-        st.session_state["_new_route_mode"] = True
+    _col_gpx, _col_new = st.columns(2, gap="large")
+
+    with _col_gpx:
+        st.markdown("#### 📂 GPXファイルを読み込む")
+        st.markdown("Stravaや他のアプリで作成・記録したGPXにターンポイントを追加して強化します")
+        st.radio(
+            "データの種類",
+            ["🗺️ ルートデータ（Stravaルート作成など）",
+             "🏃 実走行データ（GPSで記録した走行ログ）"],
+            key="_data_type_radio",
+            help="実走行データはマップマッチング・間引きを自動実行します",
+        )
+        _uploaded_start = st.file_uploader("GPXファイルをアップロード", type=["gpx"],
+                                            label_visibility="collapsed")
+
+    with _col_new:
+        st.markdown("#### ✏️ 新規ルートを作成する")
+        st.markdown("地図上をクリックしてゼロから自転車ルートを作成し、ナビ情報を付けてGPXに出力します")
+        st.markdown("""
+<ul class="feat-list">
+  <li>📍 地図クリックでルートを延伸</li>
+  <li>⚓ アンカーポイントのドラッグでルート編集</li>
+  <li>🔍 交差点ターンポイントを自動検出</li>
+  <li>⛰️ 国土地理院による標高補正（日本国内）</li>
+</ul>
+""", unsafe_allow_html=True)
+        if st.button("🗺️ 新規ルートを作成する", use_container_width=True, type="primary"):
+            for k in _STATE_KEYS:
+                st.session_state.pop(k, None)
+            st.session_state.pop("_file_key", None)
+            st.session_state["_new_route_mode"] = True
+            st.rerun()
+
+    if _uploaded_start is not None:
+        _is_actual_ride_s = "実走行データ" in st.session_state.get("_data_type_radio", "")
+        _fk = f"{_uploaded_start.name}_{_is_actual_ride_s}"
+        if st.session_state.get("_file_key") != _fk:
+            for k in _STATE_KEYS:
+                st.session_state.pop(k, None)
+            st.session_state["_file_key"] = _fk
+        st.session_state["_raw_gpx"]       = _uploaded_start.read().decode("utf-8")
+        st.session_state["_gpx_filename"]  = _uploaded_start.name
         st.rerun()
+
     st.stop()
 
-# GPXファイルがアップロードされたら新規ルートモードを解除
-if uploaded is not None and st.session_state.get("_new_route_mode"):
-    st.session_state["_new_route_mode"] = False
+# ── 編集モード（以降は両パス共通） ────────────────
+_data_type = st.session_state.get("_data_type_radio",
+                                   "🗺️ ルートデータ（Stravaルート作成など）")
+_is_actual_ride = "実走行データ" in _data_type
 
-raw_content = None
+raw_content = st.session_state.get("_raw_gpx")
 points = []
 gpx_parsed = None
 _has_wpts = False
 
-if uploaded is not None:
-    raw_content = uploaded.read().decode("utf-8")
+if raw_content:
     try:
         gpx_parsed = gpxpy.parse(raw_content)
     except Exception as e:
@@ -614,13 +674,6 @@ if uploaded is not None:
         st.stop()
 
     _has_wpts = len(gpx_parsed.waypoints) > 0
-
-    # ファイルまたは実走行チェックが変わったらリセット
-    _file_key = f"{uploaded.name}_{_is_actual_ride}"
-    if st.session_state.get("_file_key") != _file_key:
-        st.session_state["_file_key"] = _file_key
-        for k in _STATE_KEYS:
-            st.session_state.pop(k, None)
 
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 
@@ -747,13 +800,21 @@ if _is_actual_ride and not st.session_state.get("_rdp_done"):
 # ─────────────────────────────────────────────
 
 def _set_default_elev_choice():
-    if "_elev_choice" in st.session_state:
-        return
-    _go = st.session_state.get("_grade_org")
-    _gf = st.session_state.get("_grade_fix")
-    _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
-    _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
-    st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
+    n = len(active_points)
+    def _complete(elevs):
+        return bool(elevs) and len(elevs) >= n and all(e is not None for e in elevs[:n])
+    _org_ok = _complete(st.session_state.get("_trkpt_org_elevs"))
+    _fix_ok = _complete(st.session_state.get("_trkpt_fix_elevs"))
+    if _org_ok and _fix_ok:
+        _go = st.session_state.get("_grade_org")
+        _gf = st.session_state.get("_grade_fix")
+        _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+        _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
+        st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
+    elif _fix_ok:
+        st.session_state["_elev_choice"] = "fix"
+    else:
+        st.session_state["_elev_choice"] = "org"
 
 if st.session_state.get("_proc_status") is None:
     # trkpt_org: 元GPX ele値 + スパイク補正（新規ルートモードはスキップ）
@@ -959,17 +1020,52 @@ avg_spacing   = np.mean(dists_all) if dists_all else 0.0
 total_dist_km = sum(dists_all) / 1000
 route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）") if gpx_parsed else "新規ルート"
 
+# ── 「編集を破棄して戻る」ボタン ──────────────────
+if st.session_state.get("_confirm_back"):
+    st.warning("編集中の内容は破棄されます。スタート画面に戻りますか？")
+    _cb1, _cb2, _ = st.columns([1, 1, 4])
+    with _cb1:
+        if st.button("🏠 スタート画面に戻る", type="primary"):
+            for k in _STATE_KEYS:
+                st.session_state.pop(k, None)
+            st.session_state.pop("_file_key", None)
+            st.session_state.pop("_new_route_mode", None)
+            st.session_state.pop("_confirm_back", None)
+            st.rerun()
+    with _cb2:
+        if st.button("✏️ 編集を続ける"):
+            st.session_state.pop("_confirm_back", None)
+            st.rerun()
+else:
+    if st.button("↩ 編集を破棄して戻る", help="スタート画面に戻ります"):
+        st.session_state["_confirm_back"] = True
+        st.rerun()
+
+_elevs_for_gain = (
+    st.session_state.get("_trkpt_fix_elevs")
+    if st.session_state.get("_elev_choice") == "fix"
+    else st.session_state.get("_trkpt_org_elevs")
+)
+if _elevs_for_gain:
+    _gain = sum(
+        max(0, _elevs_for_gain[i+1] - _elevs_for_gain[i])
+        for i in range(len(_elevs_for_gain) - 1)
+        if _elevs_for_gain[i] is not None and _elevs_for_gain[i+1] is not None
+    )
+    _gain_str = f"{_gain:.0f} m"
+else:
+    _gain_str = "--- m"
+
 c1, c2, c3 = st.columns(3)
 c1.metric("ルート名", route_name)
 c2.metric("総距離", f"{total_dist_km:.1f} km")
-c3.metric("GPSポイント間隔（平均）", f"{avg_spacing:.0f} m")
+c3.metric("獲得標高", _gain_str)
 
 
 # ─────────────────────────────────────────────
 # 地図 + リストパネル
 # ─────────────────────────────────────────────
 
-st.info("✏️ 地図をクリックしてターンポイントを追加できます。右パネルで削除・名前（ナビゲーション内容）変更もできます。")
 
 col_map, col_list = st.columns([2, 1])
 pending = st.session_state.get("pending_wpt")
@@ -1357,7 +1453,7 @@ with col_list:
 
     _wpt_detect_col, _undo_col = st.columns([2, 1])
     with _wpt_detect_col:
-        if st.button("🔍 wpt検出", use_container_width=True,
+        if st.button("🔍 ターンポイント検出", use_container_width=True,
                      help="ルート上のターンを検出してナビ案内点を設定します"):
             _raw = detect_turns(list(active_points), min_turn_angle=45, min_dist=100, smooth=1)
             _inames = fetch_intersection_names(_raw)
@@ -1377,7 +1473,7 @@ with col_list:
             st.session_state["edit_turns"] = _us["edit_turns"]
             st.rerun()
     if st.session_state.get("route_modified") and current_turns:
-        st.warning("ルートが変更されています。wpt検出を実行してください。", icon="⚠️")
+        st.warning("ルートが変更されています。ターンポイント検出を実行してください。", icon="⚠️")
 
     st.markdown("""<style>
     [data-testid="stButton"] button {
@@ -1461,16 +1557,51 @@ with col_list:
 # ─────────────────────────────────────────────
 
 st.divider()
-st.subheader("💾 強化GPXの出力")
+st.markdown("#### 💾 GPXの出力")
 
-# ── 標高補正（手動）──────────────────────────────
-if st.session_state.get("_proc_status") == "running_fix":
-    st.info("⛰️ 国土地理院で標高補正中…（画面上部の進捗を確認してください）")
-else:
-    _col_gsi, _col_gsi_info = st.columns([1, 3])
-    with _col_gsi:
+# ── 標高設定（面取り矩形） ─────────────────────────
+_org_ok = False
+_fix_ok = False
+with st.container():
+    st.markdown('<span class="elev-section-marker" style="display:none"></span>', unsafe_allow_html=True)
+    st.markdown("""<style>
+    div[data-testid="stVerticalBlock"]:has(span.elev-section-marker):not(:has(div[data-testid="stVerticalBlock"] span.elev-section-marker)) {
+        border: 1.5px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 14px 16px;
+        background-color: #f9fafb;
+    }
+    </style>""", unsafe_allow_html=True)
+    if st.session_state.get("_proc_status") == "running_fix":
+        st.info("⛰️ 国土地理院で標高補正中…（画面上部の進捗を確認してください）")
+    else:
         _gsi_disabled = not (active_points and _is_in_japan(active_points[0][0], active_points[0][1]))
-        if st.button("⛰️ 国土地理院で標高補正", disabled=_gsi_disabled,
+        _n_pts = len(active_points)
+
+        def _is_complete(elevs):
+            if not elevs or len(elevs) < _n_pts:
+                return False
+            return all(e is not None for e in elevs[:_n_pts])
+
+        _go = st.session_state.get("_grade_org")
+        _gf = st.session_state.get("_grade_fix")
+        _org_ok = _is_complete(st.session_state.get("_trkpt_org_elevs"))
+        _fix_ok = _is_complete(st.session_state.get("_trkpt_fix_elevs"))
+        _candidates = ([k for k, ok in [("org", _org_ok), ("fix", _fix_ok)] if ok])
+
+        if len(_candidates) == 0:
+            _rec = None
+            _btn_star = "　★推奨" if not _gsi_disabled else ""
+        elif len(_candidates) == 1:
+            _rec = _candidates[0]
+            _btn_star = ""
+        else:
+            _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+            _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
+            _rec = "fix" if _sf < _so else "org"
+            _btn_star = ""
+
+        if st.button(f"⛰️ 国土地理院で標高補正{_btn_star}", disabled=_gsi_disabled,
                      help="日本国内のルートのみ対応。実行後にGSI補正データを選択できます。"):
             st.session_state["_proc_status"]    = "running_fix"
             st.session_state["_elev_batch_idx"] = 0
@@ -1478,51 +1609,34 @@ else:
             st.session_state.pop("_trkpt_fix_elevs", None)
             st.session_state.pop("_grade_fix", None)
             st.rerun()
-    with _col_gsi_info:
-        if st.session_state.get("_trkpt_fix_elevs") is not None:
-            _gf = st.session_state.get("_grade_fix")
-            if _gf:
-                st.success(f"✅ GSI補正済み　上り {_gf['max']:+.1f}%  下り {_gf['min']:+.1f}%")
-        elif not _gsi_disabled:
-            st.caption("ボタンを押すと全trkptの標高をGSIサーバーから取得します。")
 
-# ── 標高データ選択 ───────────────────────────────
-_go = st.session_state.get("_grade_org")
-_gf = st.session_state.get("_grade_fix")
-if st.session_state.get("_proc_status") == "done" and active_points:
-    _gsi_done = st.session_state.get("_trkpt_fix_elevs") is not None
-    _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
-    _sf = (_gf["max"] + abs(_gf["min"])) if (_gf and _gsi_done) else float("inf")
-    _rec = "fix" if (_gsi_done and _sf < _so) else "org"
+        if st.session_state.get("_proc_status") == "done" and active_points:
+            def _grade_label(key, grade):
+                if key == "fix" and not _fix_ok:
+                    return "国土地理院補正（実施前）"
+                if key == "org" and not _org_ok:
+                    return "元データ（標高データなし）"
+                name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
+                star = "　★推奨" if key == _rec else ""
+                return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
 
-    def _grade_label(key, grade):
-        if key == "fix" and not _gsi_done:
-            return "国土地理院補正（実施前）"
-        if key == "org" and grade is None:
-            star = "　★推奨" if not _gsi_done else ""
-            return f"元データ（標高データなし）{star}"
-        name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
-        star = "　★推奨" if key == _rec else ""
-        return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
-
-    _opts = ["org", "fix"]
-    _lbls = [_grade_label("org", _go), _grade_label("fix", _gf)]
-
-    _cur_choice = st.session_state.get("_elev_choice", "org")
-    if _cur_choice == "fix" and not _gsi_done:
-        _cur_choice = "org"
-        st.session_state["_elev_choice"] = "org"
-    _sel = st.radio("標高データ選択", _lbls, index=_opts.index(_cur_choice))
-    _chosen = _opts[_lbls.index(_sel)]
-    if _chosen == "fix" and not _gsi_done:
-        _chosen = "org"
-    if _chosen != _cur_choice:
-        st.session_state["_elev_choice"] = _chosen
-        st.rerun()
-    else:
-        st.session_state["_elev_choice"] = _chosen
-else:
-    st.session_state.setdefault("_elev_choice", "org")
+            _opts = ["org", "fix"]
+            _lbls = [_grade_label("org", _go), _grade_label("fix", _gf)]
+            _cur_choice = st.session_state.get("_elev_choice", _rec or "org")
+            if _cur_choice == "fix" and not _fix_ok:
+                _cur_choice = "org"
+                st.session_state["_elev_choice"] = "org"
+            _sel = st.radio("標高データ選択", _lbls, index=_opts.index(_cur_choice))
+            _chosen = _opts[_lbls.index(_sel)]
+            if _chosen == "fix" and not _fix_ok:
+                _chosen = "org"
+            if _chosen != _cur_choice:
+                st.session_state["_elev_choice"] = _chosen
+                st.rerun()
+            else:
+                st.session_state["_elev_choice"] = _chosen
+        else:
+            st.session_state.setdefault("_elev_choice", "org")
 
 _choice = st.session_state.get("_elev_choice", "org")
 
@@ -1534,28 +1648,15 @@ if _choice == "fix" and st.session_state.get("_trkpt_fix_elevs") is not None:
     _applied.append("⛰️ 標高補正済み（国土地理院）")
 elif _choice == "org" and st.session_state.get("_trkpt_org_elevs") is not None:
     _applied.append("⛰️ 標高補正済み（元データ）")
-if _applied:
-    st.info("出力GPXに適用: " + " ／ ".join(_applied))
 
-col_dl1, col_dl2, _ = st.columns([1, 1, 2])
-col_dl1.metric("ターンポイント数", len(current_turns))
-
-# 標高補正後の自動生成フラグ処理
 _do_generate = False
-if st.session_state.pop("_auto_generate_after_elev", False):
-    if st.session_state.get("_trkpt_fix_elevs") is not None:
-        _do_generate = True
 
 # 標高データなし警告ダイアログ
 if st.session_state.get("_confirm_no_elev"):
-    st.warning("⚠️ 標高データがありません。国土地理院で標高補正してから出力することをお勧めします。")
+    st.warning("⚠️ 標高が含まれていないルート上の点があります。標高補正してから出力することをお勧めします。")
     _cne1, _cne2, _ = st.columns([1, 1, 2])
     with _cne1:
-        if st.button("⛰️ 補正してから生成", type="primary"):
-            st.session_state["_proc_status"]              = "running_fix"
-            st.session_state["_elev_batch_idx"]           = 0
-            st.session_state["_elev_partial"]             = [None] * len(active_points)
-            st.session_state["_auto_generate_after_elev"] = True
+        if st.button("❌ キャンセル"):
             st.session_state.pop("_confirm_no_elev", None)
             st.rerun()
     with _cne2:
@@ -1565,7 +1666,7 @@ if st.session_state.get("_confirm_no_elev"):
 
 # route_modified 警告ダイアログ
 elif st.session_state.get("_confirm_generate"):
-    st.warning("⚠️ ナビ案内点がルートと一致していない可能性があります。このまま生成しますか？")
+    st.warning("⚠️ 標高が含まれていないルート上の点があります。標高補正を行うことをお勧めします。")
     _cg1, _cg2, _ = st.columns([1, 1, 2])
     with _cg1:
         if st.button("✅ 続行", type="primary"):
@@ -1576,13 +1677,19 @@ elif st.session_state.get("_confirm_generate"):
             st.session_state.pop("_confirm_generate", None)
             st.rerun()
 
+# ── 適用済みタグ＋生成ボタン（同一行） ──────────────
 else:
-    with col_dl2:
-        if st.button("📥 強化GPXを生成", type="primary", disabled=(len(current_turns) == 0)):
+    _col_applied, _col_btn = st.columns([3, 1])
+    with _col_applied:
+        if _applied:
+            st.caption("出力に適用: " + " ／ ".join(_applied))
+    with _col_btn:
+        if st.button("📥 GPXを生成", type="primary",
+                     use_container_width=True, disabled=(len(current_turns) == 0)):
             if st.session_state.get("route_modified"):
                 st.session_state["_confirm_generate"] = True
                 st.rerun()
-            elif st.session_state.get("_grade_org") is None and st.session_state.get("_trkpt_fix_elevs") is None:
+            elif not _org_ok and not _fix_ok:
                 st.session_state["_confirm_no_elev"] = True
                 st.rerun()
             else:
@@ -1606,7 +1713,7 @@ if _do_generate:
         matched_points=st.session_state.get("_matched_points") or list(active_points),
         elevations=_out_elevs,
     )
-    base_name = (uploaded.name.replace(".gpx", "") if uploaded else "new_route")
+    base_name = st.session_state.get("_gpx_filename", "new_route").replace(".gpx", "") or "new_route"
     st.download_button(
         label=f"⬇️ {base_name}_turns.gpx をダウンロード",
         data=xml_output,
