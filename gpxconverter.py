@@ -974,7 +974,7 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
                 rp[idx]["wpt"] = with_name({"name": "", "delta": t["delta"]}, _inames.get(idx))
             if rp:
                 rp[0]["wpt"]  = {"name": "スタート", "delta": None}
-                rp[-1]["wpt"] = {"name": "ゴール",   "delta": None}
+                rp[-1]["wpt"] = {"name": "目的地",   "delta": None}
         for p in rp:
             p["changed"] = False
     st.session_state["route_points"] = rp
@@ -1134,8 +1134,8 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
             st.session_state["_undo_state"] = {"route_points": _deep_copy_rp(rp)}
             _prev_pt = (rp[-1]["lat"], rp[-1]["lon"])
             _seg = calc_route_segment([_prev_pt, (_clat, _clng)])
-            # 旧ゴールwptを外す（そのtrkptはルート内点として残る）
-            if rp and rp[-1]["wpt"] is not None and rp[-1]["wpt"].get("name") == "ゴール":
+            # 旧目的地wptを外す（そのtrkptはルート内点として残る）
+            if rp and rp[-1]["wpt"] is not None and rp[-1]["wpt"].get("name") == "目的地":
                 rp[-1]["wpt"] = None
             _seg_tail = _seg[1:]
             new_seg_pts = [
@@ -1143,7 +1143,7 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
                 for j, (lat, lon) in enumerate(_seg_tail)
             ]
             if new_seg_pts:
-                new_seg_pts[-1]["wpt"]    = {"name": "ゴール", "delta": None}
+                new_seg_pts[-1]["wpt"]    = {"name": "目的地", "delta": None}
                 new_seg_pts[-1]["changed"] = False
             st.session_state["route_points"] = rp + new_seg_pts
         st.session_state["route_modified"] = True
@@ -1184,7 +1184,7 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
                     for j, (lat, lon) in enumerate(_seg_tail)
                 ]
                 if new_pts:
-                    new_pts[-1]["wpt"]    = {"name": "ゴール", "delta": None}
+                    new_pts[-1]["wpt"]    = {"name": "目的地", "delta": None}
                     new_pts[-1]["changed"] = False
                 rp[_prev_idx+1:] = new_pts
 
@@ -1242,8 +1242,8 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
                     rp_new = rp[:_prev_idx + 1]
                     if rp_new:
                         rp_new[-1]["is_acpt"] = True
-                        if rp_new[-1]["wpt"] is None or rp_new[-1]["wpt"].get("name") != "ゴール":
-                            rp_new[-1]["wpt"] = {"name": "ゴール", "delta": None}
+                        if rp_new[-1]["wpt"] is None or rp_new[-1]["wpt"].get("name") != "目的地":
+                            rp_new[-1]["wpt"] = {"name": "目的地", "delta": None}
                     st.session_state["route_points"] = rp_new
 
             else:
@@ -1480,17 +1480,29 @@ def _save_gpx_dialog(route_points, elev_choice):
     else:
         st.markdown("**標高** ⚠️ データなし")
 
-    if route_modified or (not org_ok and not fix_ok):
+    _wpt_issue  = bool(route_modified)
+    _elev_issue = not org_ok and not fix_ok
+    if _wpt_issue and _elev_issue:
         st.warning(
-            "未設定区間があります。"
-            "「ターンポイントの検出」「国土地理院で標高補正」を行ってから保存することを推奨します。"
+            "ターンポイントが未確定で、標高不明のセグメントが存在します。"
+            "「ターンポイント検出」と「国土地理院で標高補正」を行ってから保存することを推奨します。"
+        )
+    elif _wpt_issue:
+        st.warning(
+            "ターンポイントが未確定です。"
+            "ルート変更後に「ターンポイント検出」を行ってから保存することを推奨します。"
+        )
+    elif _elev_issue:
+        st.warning(
+            "標高不明のセグメントが存在します。"
+            "「国土地理院で標高補正」を行ってから保存することを推奨します。"
         )
 
     st.divider()
 
     # ── ファイル名入力 ──────────────────────────────
     _default = (st.session_state.get("_gpx_filename", "new_route")
-                .replace(".gpx", "") or "new_route") + "_turns"
+                .replace(".gpx", "") or "new_route") + "_gne"
     _fname = st.text_input("ファイル名", value=_default, key="_dialog_fname")
 
     # ── GPX生成 ────────────────────────────────────
@@ -1694,7 +1706,7 @@ with st.container():
                 if key == "fix" and not _fix_ok:
                     return "国土地理院補正（実施前）"
                 if key == "org" and not _org_ok:
-                    return "元データ（標高データなし）"
+                    return "元データ（標高不明のセグメントあり）"
                 name = "元データ（スパイク補正済み）" if key == "org" else "国土地理院補正（スパイク補正済み）"
                 star = "　★推奨" if key == _rec else ""
                 return f"{name}{star}　上り {grade['max']:+.1f}%  下り {grade['min']:+.1f}%"
