@@ -286,9 +286,7 @@ def fetch_intersection_names(turns, radius=20):
         return {}
 
     n = len(turns)
-    prog = st.progress(0, text=f"交差点名を取得中…（{n} 件）")
 
-    # ^ $ で完全一致させ bus_stop などの部分一致を防ぐ
     _HW = '"^(traffic_signals|crossing|give_way|stop|mini_roundabout|motorway_junction)$"'
     union_parts = "".join(
         f'node(around:{radius},{t["lat"]},{t["lon"]})[name][highway~{_HW}];'
@@ -297,30 +295,28 @@ def fetch_intersection_names(turns, radius=20):
     query = f"[out:json][timeout:25];({union_parts});out body;"
 
     elements = None
-    for url in _OVERPASS_URLS:
-        try:
-            resp = requests.post(
-                url,
-                data="data=" + urllib.parse.quote(query),
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                    "User-Agent": "GPXTurnDetector/1.0",
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            elements = resp.json().get("elements", [])
-            break
-        except Exception:
-            pass
+    with st.spinner(f"交差点名を取得中…（{n} 件）"):
+        for url in _OVERPASS_URLS:
+            try:
+                resp = requests.post(
+                    url,
+                    data="data=" + urllib.parse.quote(query),
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                        "User-Agent": "GPXTurnDetector/1.0",
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                elements = resp.json().get("elements", [])
+                break
+            except Exception:
+                pass
 
     if elements is None:
-        prog.empty()
         return {}
 
-    # 各ターンポイントに最近傍ノードの名前を対応付ける
-    prog.progress(0.8, text="交差点名を処理中…")
     result = {}
     for i, t in enumerate(turns):
         nearest_name = None
@@ -332,9 +328,7 @@ def fetch_intersection_names(turns, radius=20):
                 nearest_name = node.get("tags", {}).get("name")
         if nearest_name and nearest_dist <= radius:
             result[t["index"]] = nearest_name
-        prog.progress(0.8 + 0.2 * (i + 1) / n, text="交差点名を処理中…")
 
-    prog.empty()
     return result
 
 def fetch_spot_name(lat, lon, radius=20):
@@ -649,23 +643,18 @@ def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
         enhanced = gpxpy.parse(gpx_content_str)
     else:
         enhanced = gpxpy.gpx.GPX()
-        track = gpxpy.gpx.GPXTrack()
-        seg   = gpxpy.gpx.GPXTrackSegment()
-        for lat, lon in coords:
-            seg.points.append(gpxpy.gpx.GPXTrackPoint(lat, lon))
-        track.segments.append(seg)
-        enhanced.tracks.append(track)
+        enhanced.tracks.append(gpxpy.gpx.GPXTrack())
 
-    # trkpt の座標・標高を更新
-    all_pts = [pt for tr in enhanced.tracks
-               for seg in tr.segments for pt in seg.points]
-    for i, pt in enumerate(all_pts):
-        if i < len(coords):
-            pt.latitude  = coords[i][0]
-            pt.longitude = coords[i][1]
-    for i, pt in enumerate(all_pts):
+    # trkpt をroute_pointsの点数で完全に置き換える
+    # （RDP間引き・マップマッチングで点数が変わっている場合に対応）
+    _new_seg = gpxpy.gpx.GPXTrackSegment()
+    for i, (lat, lon) in enumerate(coords):
+        pt = gpxpy.gpx.GPXTrackPoint(lat, lon)
         if i < len(elevs) and elevs[i] is not None:
             pt.elevation = elevs[i]
+        _new_seg.points.append(pt)
+    if enhanced.tracks:
+        enhanced.tracks[0].segments = [_new_seg]
 
     # ターンポイントを再構築
     enhanced.waypoints = []
@@ -709,7 +698,7 @@ def _set_default_elev_choice():
 _STATE_KEYS = [
     "route_points",
     "_map_center", "_map_zoom",
-    "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
+    "_matched_points", "_mm_base_points", "_mm_kept_indices", "_mm_status", "_mm_n_snapped", "_mm_error",
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
     "_proc_status",
     "_grade_org", "_grade_fix", "_elev_choice",
@@ -840,58 +829,41 @@ if st.session_state.get("_new_route_mode"):
     st.session_state.setdefault("_matched_points", [])
     st.session_state.setdefault("_proc_status", "done")
 
-_needs_rerun = False
-
-if st.session_state.get("_mm_status") is None:
-    if not _is_actual_ride:
-        # ルートデータ：マップマッチングスキップ
-        st.session_state["_matched_points"] = list(points)
-        st.session_state["_mm_status"]      = "スキップ"
-    else:
-        # 実走行データ：マップマッチング実行
-        st.session_state["_mm_status"]              = "running"
-        st.session_state["_mm_chunk_idx"]           = 0
-        st.session_state["_mm_matched_partial"]     = list(points)
-        st.session_state["_mm_n_snapped_partial"]   = 0
-        st.session_state["_mm_errors_partial"]      = []
-
-if st.session_state.get("_mm_status") == "running":
-    _MM_CHUNK  = 50
-    _ci        = st.session_state["_mm_chunk_idx"]
-    _n_chunks  = math.ceil(len(points) / _MM_CHUNK)
+@st.dialog("🗺️ マップマッチング中", width="large")
+def _mm_progress_dialog():
+    _mm_pts   = st.session_state.get("_mm_base_points", [])
+    _MM_CHUNK = 50
+    _ci       = st.session_state.get("_mm_chunk_idx", 0)
+    _n_chunks = math.ceil(len(_mm_pts) / _MM_CHUNK) if _mm_pts else 1
     _cancelled = st.session_state.pop("_mm_cancel_requested", False)
 
-    _col_prog, _col_btn = st.columns([5, 1])
-    with _col_prog:
-        _prog_area = st.empty()
-        if _cancelled:
-            _prog_area.progress(_ci / _n_chunks, text="⏱️ キャンセル待ち中…")
-        else:
-            _prog_area.progress((_ci + 1) / _n_chunks,
-                                text=f"🗺️ マップマッチング中… {_ci + 1}/{_n_chunks} チャンク")
-    with _col_btn:
-        if st.button("⏹ キャンセル", key="mm_cancel_btn"):
-            st.session_state["_mm_cancel_requested"] = True
-            st.rerun()
+    _prog_area = st.empty()
+    if _cancelled:
+        _prog_area.progress(_ci / _n_chunks, text="⏱️ キャンセル待ち中…")
+    else:
+        _prog_area.progress((_ci + 1) / _n_chunks,
+                            text=f"🗺️ マップマッチング中… {_ci + 1}/{_n_chunks} チャンク")
+    if st.button("⏹ キャンセル", key="mm_cancel_btn"):
+        st.session_state["_mm_cancel_requested"] = True
+        st.rerun()
 
     if _cancelled:
         _errs = st.session_state.get("_mm_errors_partial", [])
-        st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(points))
+        st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(_mm_pts))
         st.session_state["_mm_n_snapped"]   = st.session_state.get("_mm_n_snapped_partial", 0)
         st.session_state["_mm_error"]       = "キャンセルされました" + ("; " + "; ".join(_errs) if _errs else "")
         st.session_state["_mm_status"]      = "キャンセル"
         for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
             st.session_state.pop(_k, None)
         _prog_area.progress(1.0, text="✅ キャンセルしました")
-        _needs_rerun = True
+        st.rerun()
     else:
         _s = _ci * _MM_CHUNK
-        _e = min(_s + _MM_CHUNK, len(points))
+        _e = min(_s + _MM_CHUNK, len(_mm_pts))
         _auto_cancel = False
-
         try:
             _mp_list = st.session_state["_mm_matched_partial"]
-            _data = _valhalla_match_chunk(points[_s:_e])
+            _data = _valhalla_match_chunk(_mm_pts[_s:_e])
             for _j, _mp in enumerate(_data.get("matched_points", [])):
                 if _mp.get("type") in ("matched", "interpolated") and _s + _j < len(_mp_list):
                     _mp_list[_s + _j] = (_mp["lat"], _mp["lon"])
@@ -905,18 +877,18 @@ if st.session_state.get("_mm_status") == "running":
             st.session_state["_mm_errors_partial"].append(f"chunk {_ci}: {_ex}")
 
         if _auto_cancel:
-            st.session_state["_matched_points"] = list(points)
+            st.session_state["_matched_points"] = list(_mm_pts)
             st.session_state["_mm_n_snapped"]   = 0
             st.session_state["_mm_error"]       = "1チャンク目タイムアウトにより自動キャンセル"
             st.session_state["_mm_status"]      = "キャンセル"
             for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
                 st.session_state.pop(_k, None)
             _prog_area.progress(1.0, text="✅ タイムアウトによりキャンセルしました")
-            _needs_rerun = True
+            st.rerun()
         elif _ci + 1 >= _n_chunks:
-            _errs  = st.session_state.get("_mm_errors_partial", [])
-            _n_sn  = st.session_state.get("_mm_n_snapped_partial", 0)
-            st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(points))
+            _errs = st.session_state.get("_mm_errors_partial", [])
+            _n_sn = st.session_state.get("_mm_n_snapped_partial", 0)
+            st.session_state["_matched_points"] = st.session_state.get("_mm_matched_partial", list(_mm_pts))
             st.session_state["_mm_n_snapped"]   = _n_sn
             st.session_state["_mm_error"]       = "; ".join(_errs) if _errs else None
             st.session_state["_mm_status"]      = "完了" if _n_sn > 0 else "エラー"
@@ -926,6 +898,30 @@ if st.session_state.get("_mm_status") == "running":
         else:
             st.session_state["_mm_chunk_idx"] = _ci + 1
             st.rerun()
+
+
+if st.session_state.get("_mm_status") is None:
+    if not _is_actual_ride:
+        # ルートデータ：マップマッチングスキップ
+        st.session_state["_matched_points"] = list(points)
+        st.session_state["_mm_status"]      = "スキップ"
+    else:
+        # 実走行データ：RDP先行間引き → マップマッチング開始
+        # epsilon は度単位（1度≈111km）。5m相当 = 5/111000 ≈ 0.000045
+        _rdp_mask    = rdp_simplify([[p[0], p[1]] for p in points], epsilon=0.00005, return_mask=True)
+        _mm_pts_init = [tuple(points[i]) for i, keep in enumerate(_rdp_mask) if keep]
+        _mm_kept_idx = [i for i, keep in enumerate(_rdp_mask) if keep]
+        st.session_state["_mm_base_points"]         = _mm_pts_init
+        st.session_state["_mm_kept_indices"]        = _mm_kept_idx
+        st.session_state["_rdp_done"]               = True
+        st.session_state["_mm_status"]              = "running"
+        st.session_state["_mm_chunk_idx"]           = 0
+        st.session_state["_mm_matched_partial"]     = list(_mm_pts_init)
+        st.session_state["_mm_n_snapped_partial"]   = 0
+        st.session_state["_mm_errors_partial"]      = []
+
+if st.session_state.get("_mm_status") == "running":
+    _mm_progress_dialog()
 
 # ─────────────────────────────────────────────
 # route_points 初期化（初回のみ）
@@ -939,8 +935,15 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
         rp[-1]["is_acpt"] = True
         # org 標高処理
         if gpx_parsed is not None:
-            _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
-                           for seg in tr.segments for p in seg.points]
+            _all_orig_elevs = [p.elevation for tr in gpx_parsed.tracks
+                               for seg in tr.segments for p in seg.points]
+            # RDP間引き済みの場合は元インデックスで標高をマッピング
+            _kept_idx = st.session_state.get("_mm_kept_indices")
+            if _kept_idx and len(_kept_idx) == len(_base_coords):
+                _orig_elevs = [_all_orig_elevs[i] if i < len(_all_orig_elevs) else None
+                               for i in _kept_idx]
+            else:
+                _orig_elevs = _all_orig_elevs
             if not all(e is None for e in _orig_elevs):
                 _org_cleaned, _ = clean_elevation_spikes(_base_coords, _orig_elevs)
                 for i, v in enumerate(_org_cleaned):
@@ -990,20 +993,6 @@ if st.session_state.get("_new_route_mode") and "route_points" not in st.session_
     st.session_state["_proc_status"] = "done"
 
 route_points = st.session_state.get("route_points", [])
-
-# 実走行データ：マップマッチング完了後にRDP間引き（1回のみ）
-if _is_actual_ride and not st.session_state.get("_rdp_done"):
-    _mm_st = st.session_state.get("_mm_status")
-    if _mm_st in ("完了", "キャンセル", "スキップ") and route_points:
-        _coords_rdp = [[p["lat"], p["lon"]] for p in route_points]
-        _thinned = rdp_simplify(_coords_rdp, epsilon=5.0)
-        _thinned_set = {(c[0], c[1]) for c in _thinned}
-        st.session_state["route_points"] = [p for p in route_points if (p["lat"], p["lon"]) in _thinned_set]
-        route_points = st.session_state["route_points"]
-        st.session_state["_rdp_done"] = True
-
-if _needs_rerun:
-    st.rerun()
 
 if _has_wpts:
     st.info("📂 GPX内のターンポイントを読み込みました。マップマッチング・標高補正はスキップされています。")
@@ -1532,6 +1521,126 @@ def _save_gpx_dialog(route_points, elev_choice):
             st.rerun()
 
 
+@st.dialog("⛰️ 国土地理院 標高補正中", width="large")
+def _gsi_progress_dialog():
+    _rp         = st.session_state.get("route_points", [])
+    _en         = len(_rp)
+    _E_BATCH    = 50
+    _en_batches = math.ceil(_en / _E_BATCH)
+    _ebi        = st.session_state.get("_elev_batch_idx", 0)
+    _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
+
+    _elev_prog_area = st.empty()
+    _pending_retry = st.session_state.get("_elev_retry_idxs")
+    if _pending_retry:
+        _es_init = _ebi * _E_BATCH
+        _ee_init = min(_es_init + _E_BATCH, _en)
+        _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
+        _elev_prog_area.progress(
+            (_es_init + _n_confirmed) / _en,
+            text=f"⚠️ 国土地理院が遅いです（{len(_pending_retry)}点再試行中）… {_es_init + _n_confirmed}/{_en} 点確定",
+        )
+    else:
+        _elev_prog_area.progress(
+            _ebi / _en_batches,
+            text=f"⛰️ 標高補正中（国土地理院）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
+        )
+    if st.button("⏹ キャンセル", key="elev_cancel_btn"):
+        st.session_state["_elev_cancel_requested"] = True
+        st.rerun()
+
+    def _finalize_fix(partial_list, cancelled=False):
+        rp = st.session_state.get("route_points", [])
+        if not cancelled and partial_list:
+            _coords_fix = [(p["lat"], p["lon"]) for p in rp]
+            _fix_cleaned, _ = clean_elevation_spikes(_coords_fix, partial_list)
+            for i, v in enumerate(_fix_cleaned):
+                if i < len(rp):
+                    rp[i]["ele_fix"] = v
+            st.session_state["_grade_fix"] = compute_grade_stats(_coords_fix, _fix_cleaned)
+        else:
+            for p in rp:
+                p["ele_fix"] = None
+            st.session_state["_grade_fix"] = None
+        st.session_state["route_points"] = rp
+        for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
+            st.session_state.pop(_ek, None)
+        st.session_state["_proc_status"] = "done"
+        _set_default_elev_choice()
+
+    if _ecancelled:
+        _ep = st.session_state.get("_elev_partial", [None] * _en)
+        _finalize_fix(_ep, cancelled=True)
+        _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
+        st.rerun()
+    else:
+        _es = _ebi * _E_BATCH
+        _ee = min(_es + _E_BATCH, _en)
+        _ep = st.session_state.get("_elev_partial", [None] * _en)
+
+        _etls = threading.local()
+        def _efetch(args):
+            _ei, _elat, _elon = args
+            if not hasattr(_etls, "session"):
+                _etls.session = requests.Session()
+            try:
+                _er = _etls.session.get(
+                    "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
+                    params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
+                    timeout=10,
+                )
+                _er.raise_for_status()
+                _ev = _er.json().get("elevation")
+                val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
+                return _ei, val, False
+            except Exception:
+                return _ei, None, True
+
+        _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
+        _is_retry   = _retry_idxs is not None
+        _etasks = (
+            [(_ei, _rp[_ei]["lat"], _rp[_ei]["lon"]) for _ei in _retry_idxs]
+            if _is_retry
+            else [(_es + i, _rp[_es + i]["lat"], _rp[_es + i]["lon"]) for i in range(_ee - _es)]
+        )
+        _edone      = [0]
+        _econfirmed = [0]
+        _bar_prev   = [0]
+        _err_idxs   = []
+        with ThreadPoolExecutor(max_workers=10) as _eex:
+            for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
+                _ei2, _ev2, _err = _ef.result()
+                if _err:
+                    _err_idxs.append(_ei2)
+                else:
+                    _ep[_ei2] = _ev2
+                    _econfirmed[0] += 1
+                _edone[0] += 1
+                if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
+                    _bar_prev[0] = _econfirmed[0]
+                    _pts_confirmed = _es + _econfirmed[0]
+                    _elev_prog_area.progress(
+                        _pts_confirmed / _en,
+                        text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
+                    )
+        if _err_idxs:
+            st.session_state["_elev_retry_idxs"] = _err_idxs
+            _n_confirmed = (_ee - _es) - len(_err_idxs)
+            _elev_prog_area.progress(
+                (_es + _n_confirmed) / _en,
+                text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
+            )
+            st.rerun()
+
+        st.session_state["_elev_partial"] = _ep
+        if _ebi + 1 >= _en_batches:
+            _finalize_fix(_ep)
+            _elev_prog_area.progress(1.0, text="✅ 標高補正完了")
+        else:
+            st.session_state["_elev_batch_idx"] = _ebi + 1
+        st.rerun()
+
+
 st.markdown("#### 💾 GPXの出力")
 
 # ── 標高設定（面取り矩形） ─────────────────────────
@@ -1549,126 +1658,7 @@ with st.container():
     }
     </style>""", unsafe_allow_html=True)
     if st.session_state.get("_proc_status") == "running_fix":
-        _en         = len(route_points)
-        _E_BATCH    = 50
-        _en_batches = math.ceil(_en / _E_BATCH)
-        _ebi        = st.session_state.get("_elev_batch_idx", 0)
-        _ecancelled = st.session_state.pop("_elev_cancel_requested", False)
-
-        _ecol_prog, _ecol_btn = st.columns([5, 1])
-        with _ecol_prog:
-            _elev_prog_area = st.empty()
-            _pending_retry = st.session_state.get("_elev_retry_idxs")
-            if _pending_retry:
-                _es_init = _ebi * _E_BATCH
-                _ee_init = min(_es_init + _E_BATCH, _en)
-                _n_confirmed = (_ee_init - _es_init) - len(_pending_retry)
-                _elev_prog_area.progress(
-                    (_es_init + _n_confirmed) / _en,
-                    text=f"⚠️ 国土地理院が遅いです（{len(_pending_retry)}点再試行中）… {_es_init + _n_confirmed}/{_en} 点確定",
-                )
-            else:
-                _elev_prog_area.progress(
-                    _ebi / _en_batches,
-                    text=f"⛰️ 標高補正中（国土地理院）… {min(_ebi * _E_BATCH, _en)}/{_en} 点",
-                )
-        with _ecol_btn:
-            if st.button("⏹ キャンセル", key="elev_cancel_btn"):
-                st.session_state["_elev_cancel_requested"] = True
-                st.rerun()
-
-        def _finalize_fix(partial_list, cancelled=False):
-            rp = st.session_state.get("route_points", [])
-            if not cancelled and partial_list:
-                _coords_fix = [(p["lat"], p["lon"]) for p in rp]
-                _fix_cleaned, _ = clean_elevation_spikes(_coords_fix, partial_list)
-                for i, v in enumerate(_fix_cleaned):
-                    if i < len(rp):
-                        rp[i]["ele_fix"] = v
-                st.session_state["_grade_fix"] = compute_grade_stats(_coords_fix, _fix_cleaned)
-            else:
-                for p in rp:
-                    p["ele_fix"] = None
-                st.session_state["_grade_fix"] = None
-            st.session_state["route_points"] = rp
-            for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
-                st.session_state.pop(_ek, None)
-            st.session_state["_proc_status"] = "done"
-            _set_default_elev_choice()
-
-        if _ecancelled:
-            _ep = st.session_state.get("_elev_partial", [None] * _en)
-            _finalize_fix(_ep, cancelled=True)
-            _elev_prog_area.progress(1.0, text="✅ キャンセルしました")
-            st.rerun()
-        else:
-            _es = _ebi * _E_BATCH
-            _ee = min(_es + _E_BATCH, _en)
-            _ep = st.session_state.get("_elev_partial", [None] * _en)
-
-            _etls = threading.local()
-            def _efetch(args):
-                _ei, _elat, _elon = args
-                if not hasattr(_etls, "session"):
-                    _etls.session = requests.Session()
-                try:
-                    _er = _etls.session.get(
-                        "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php",
-                        params={"lat": _elat, "lon": _elon, "outtype": "JSON"},
-                        timeout=10,
-                    )
-                    _er.raise_for_status()
-                    _ev = _er.json().get("elevation")
-                    val = None if (_ev is None or _ev == -9999 or _ev == "-----") else float(_ev)
-                    return _ei, val, False
-                except Exception:
-                    return _ei, None, True
-
-            _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
-            _is_retry   = _retry_idxs is not None
-            _etasks = (
-                [(_ei, route_points[_ei]["lat"], route_points[_ei]["lon"]) for _ei in _retry_idxs]
-                if _is_retry
-                else [(_es + i, route_points[_es + i]["lat"], route_points[_es + i]["lon"])
-                      for i in range(_ee - _es)]
-            )
-            _edone      = [0]
-            _econfirmed = [0]
-            _bar_prev   = [0]
-            _err_idxs   = []
-            with ThreadPoolExecutor(max_workers=10) as _eex:
-                for _ef in as_completed({_eex.submit(_efetch, t): t[0] for t in _etasks}):
-                    _ei2, _ev2, _err = _ef.result()
-                    if _err:
-                        _err_idxs.append(_ei2)
-                    else:
-                        _ep[_ei2] = _ev2
-                        _econfirmed[0] += 1
-                    _edone[0] += 1
-                    if not _is_retry and (_econfirmed[0] - _bar_prev[0] >= 10 or _edone[0] == len(_etasks)):
-                        _bar_prev[0] = _econfirmed[0]
-                        _pts_confirmed = _es + _econfirmed[0]
-                        _elev_prog_area.progress(
-                            _pts_confirmed / _en,
-                            text=f"⛰️ 標高補正中（国土地理院）… {_pts_confirmed}/{_en} 点",
-                        )
-            if _err_idxs:
-                st.session_state["_elev_retry_idxs"] = _err_idxs
-                _n_confirmed = (_ee - _es) - len(_err_idxs)
-                _elev_prog_area.progress(
-                    (_es + _n_confirmed) / _en,
-                    text=f"⚠️ 国土地理院が遅いです（{len(_err_idxs)}点再試行中）… {_es + _n_confirmed}/{_en} 点確定",
-                )
-                st.rerun()
-
-            st.session_state["_elev_partial"] = _ep
-
-            if _ebi + 1 >= _en_batches:
-                _finalize_fix(_ep)
-                _elev_prog_area.progress(1.0, text="✅ 標高補正完了")
-            else:
-                st.session_state["_elev_batch_idx"] = _ebi + 1
-            st.rerun()
+        _gsi_progress_dialog()
     else:
         _gsi_disabled = not (route_points and _is_in_japan(route_points[0]["lat"], route_points[0]["lon"]))
         _n_pts = len(route_points)
