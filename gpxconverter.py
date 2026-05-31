@@ -21,7 +21,7 @@ import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "3.0.0"
 
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
 st.markdown(f'# 🚴 gpx-navi エディター <span style="font-size:0.35em; color:#9ca3af; font-weight:normal; vertical-align:middle;">v{APP_VERSION}</span>', unsafe_allow_html=True)
@@ -49,23 +49,85 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin((lat2-lat1)/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin((lon2-lon1)/2)**2
     return R * 2 * math.asin(math.sqrt(max(0, a)))
 
-def _render_elevation_profile(active_points, dists_all, org_elevs, fix_elevs, turns):
-    n = len(active_points)
+# ─────────────────────────────────────────────
+# RoutePoint ヘルパー関数
+# ─────────────────────────────────────────────
+
+def make_route_point(lat, lon, ele_org=None, is_acpt=False, wpt=None, changed=True):
+    return {
+        "lat": float(lat),
+        "lon": float(lon),
+        "ele_org": ele_org,
+        "ele_fix": None,
+        "is_acpt": is_acpt,
+        "wpt": wpt,
+        "changed": changed,
+    }
+
+def _deep_copy_rp(rp):
+    return [
+        {
+            "lat": p["lat"],
+            "lon": p["lon"],
+            "ele_org": p["ele_org"],
+            "ele_fix": p["ele_fix"],
+            "is_acpt": p["is_acpt"],
+            "wpt": dict(p["wpt"]) if p["wpt"] else None,
+            "changed": p["changed"],
+        }
+        for p in rp
+    ]
+
+def _prev_boundary(idx, rp):
+    """idxより前にあるis_acptまたはwptのうち最大のindexを返す"""
+    cands = [i for i, p in enumerate(rp[:idx]) if p["is_acpt"] or p["wpt"] is not None]
+    return max(cands) if cands else 0
+
+def _next_boundary(idx, rp):
+    """idxより後にあるis_acptまたはwptのうち最小のindexを返す"""
+    cands = [i for i, p in enumerate(rp[idx+1:], start=idx+1) if p["is_acpt"] or p["wpt"] is not None]
+    return min(cands) if cands else len(rp) - 1
+
+def _contiguous_ranges(indices):
+    """連続するインデックスをまとめて (start, end) タプルのリストにする"""
+    if not indices:
+        return []
+    ranges, start, end = [], indices[0], indices[0]
+    for i in indices[1:]:
+        if i == end + 1:
+            end = i
+        else:
+            ranges.append((start, end))
+            start = end = i
+    ranges.append((start, end))
+    return ranges
+
+
+def _render_elevation_profile(route_points):
+    n = len(route_points)
     if n < 2:
         return None
 
+    dists_all = [
+        haversine(route_points[i]["lat"], route_points[i]["lon"],
+                  route_points[i+1]["lat"], route_points[i+1]["lon"])
+        for i in range(n - 1)
+    ]
     cum_dist = [0.0]
     for d in dists_all:
         cum_dist.append(cum_dist[-1] + d / 1000)
     total_km = cum_dist[-1]
+
+    org_e_raw = [p["ele_org"] for p in route_points]
+    fix_e_raw = [p["ele_fix"] for p in route_points]
 
     def _prep(elevs):
         if not elevs or len(elevs) < n:
             return None
         return list(elevs[:n])
 
-    org_e = _prep(org_elevs)
-    fix_e = _prep(fix_elevs)
+    org_e = _prep(org_e_raw)
+    fix_e = _prep(fix_e_raw)
 
     all_vals = [v for e in [org_e, fix_e] if e for v in e if v is not None]
     if all_vals:
@@ -95,10 +157,9 @@ def _render_elevation_profile(active_points, dists_all, org_elevs, fix_elevs, tu
     if ele_min <= 0 <= ele_max:
         fig.add_hline(y=0, line_color="gray", line_width=1)
 
-    for t in turns:
-        idx = t.get("index", 0)
-        if 0 <= idx < len(cum_dist):
-            fig.add_vline(x=cum_dist[idx], line_color="rgba(100,100,200,0.5)", line_width=1)
+    for i, p in enumerate(route_points):
+        if p["wpt"] is not None and 0 <= i < len(cum_dist):
+            fig.add_vline(x=cum_dist[i], line_color="rgba(100,100,200,0.5)", line_width=1)
 
     tick_step = 5 if total_km < 50 else 10
     tick_vals = list(range(tick_step, int(total_km) + 1, tick_step))
@@ -183,35 +244,22 @@ def nearest_trkpt_index(lat, lon, points):
     return min(range(len(points)),
                key=lambda i: haversine(lat, lon, points[i][0], points[i][1]))
 
-def _adj_idx(trkpt_idx, acpts, wpts, n_pts, direction):
-    """acpts と wpts の両方を境界候補として、前(direction<0)または後(direction>0)の境界 trkpt インデックスを返す。"""
-    cands_all = (
-        [a["trkpt_idx"] for a in acpts]
-        + [t["index"] for t in wpts if t.get("index") is not None]
-    )
-    if direction < 0:
-        cands = [i for i in cands_all if i < trkpt_idx]
-        return max(cands) if cands else 0
-    else:
-        cands = [i for i in cands_all if i > trkpt_idx]
-        return min(cands) if cands else n_pts - 1
-
-def with_name(t, intersection_name=None):
-    """nameフィールドを持つターン辞書を返す。
+def with_name(wpt_info, intersection_name=None):
+    """nameフィールドを持つWptInfo辞書を返す。
     intersection_name がある場合は「△△交差点を右折」形式、
     ない場合は従来通り「右折」形式。
     """
-    d = dict(t)
-    dir_label = turn_label(t["delta"])[0]
+    d = dict(wpt_info)
+    dir_label = turn_label(wpt_info["delta"])[0]
     if intersection_name:
         d["name"] = f"{intersection_name}を{dir_label}"
     else:
         d["name"] = dir_label
     return d
 
-def wpt_style(t):
+def wpt_style(wpt_info):
     """(arrow, hex_color) を返す"""
-    delta = t.get("delta")
+    delta = wpt_info.get("delta") if wpt_info else None
     if delta is not None:
         _, arrow, color = turn_label(delta)
     else:
@@ -513,8 +561,6 @@ def clean_elevation_spikes(points, elevations, bad_grade_threshold=15.0, cluster
     for cluster in clusters:
         start_pt = cluster["start_seg"]
         end_pt = cluster["end_seg"] + 1
-        # 境界アンカー候補がスパイク隣接点の場合は is_anchor_candidate で弾く
-        # （隣接勾配チェックが入るため、スパイク端点は自動的に除外される）
         left_anchor = (start_pt if (is_left_boundary_anchor(start_pt) and is_anchor_candidate(start_pt))
                        else find_anchor(start_pt - 1, -1))
         right_anchor = (end_pt if (is_right_boundary_anchor(end_pt) and is_anchor_candidate(end_pt))
@@ -595,59 +641,82 @@ def compute_grade_stats(points, elevations):
 # GPX ビルダー（マッチング・標高補正対応）
 # ─────────────────────────────────────────────
 
-def build_enhanced_gpx(gpx_content_str, turns, matched_points=None, elevations=None):
+def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
+    coords = [(p["lat"], p["lon"]) for p in route_points]
+    elevs  = [p["ele_fix"] if elev_choice == "fix" else p["ele_org"] for p in route_points]
+
     if gpx_content_str:
         enhanced = gpxpy.parse(gpx_content_str)
     else:
         enhanced = gpxpy.gpx.GPX()
         track = gpxpy.gpx.GPXTrack()
         seg   = gpxpy.gpx.GPXTrackSegment()
-        for pt in (matched_points or []):
-            seg.points.append(gpxpy.gpx.GPXTrackPoint(pt[0], pt[1]))
+        for lat, lon in coords:
+            seg.points.append(gpxpy.gpx.GPXTrackPoint(lat, lon))
         track.segments.append(seg)
         enhanced.tracks.append(track)
 
     # trkpt の座標・標高を更新
     all_pts = [pt for tr in enhanced.tracks
                for seg in tr.segments for pt in seg.points]
-    if matched_points:
-        for i, pt in enumerate(all_pts):
-            if i < len(matched_points):
-                pt.latitude  = matched_points[i][0]
-                pt.longitude = matched_points[i][1]
-    if elevations:
-        for i, pt in enumerate(all_pts):
-            if i < len(elevations) and elevations[i] is not None:
-                pt.elevation = elevations[i]
+    for i, pt in enumerate(all_pts):
+        if i < len(coords):
+            pt.latitude  = coords[i][0]
+            pt.longitude = coords[i][1]
+    for i, pt in enumerate(all_pts):
+        if i < len(elevs) and elevs[i] is not None:
+            pt.elevation = elevs[i]
 
     # ターンポイントを再構築
     enhanced.waypoints = []
-    for t in turns:
-        name  = t.get("name") or turn_label(t["delta"])[0]
-        delta = t.get("delta")
+    for p in route_points:
+        if p["wpt"] is None:
+            continue
+        winfo = p["wpt"]
+        name  = winfo.get("name") or ""
+        delta = winfo.get("delta")
+        if not name and delta is not None:
+            name = turn_label(delta)[0]
         desc  = f"bearing_change:{delta:.1f}" if delta is not None else "manually added"
         enhanced.waypoints.append(gpxpy.gpx.GPXWaypoint(
-            latitude=t["lat"], longitude=t["lon"], name=name, description=desc,
+            latitude=p["lat"], longitude=p["lon"], name=name, description=desc,
         ))
     return enhanced.to_xml()
+
+# ─────────────────────────────────────────────
+# 標高デフォルト選択
+# ─────────────────────────────────────────────
+
+def _set_default_elev_choice():
+    rp = st.session_state.get("route_points", [])
+    _org_ok = bool(rp) and all(p["ele_org"] is not None for p in rp)
+    _fix_ok = bool(rp) and all(p["ele_fix"] is not None for p in rp)
+    if _org_ok and _fix_ok:
+        _go = st.session_state.get("_grade_org")
+        _gf = st.session_state.get("_grade_fix")
+        _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
+        _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
+        st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
+    elif _fix_ok:
+        st.session_state["_elev_choice"] = "fix"
+    else:
+        st.session_state["_elev_choice"] = "org"
 
 # ─────────────────────────────────────────────
 # ファイルアップロード / 新規ルートモード
 # ─────────────────────────────────────────────
 
 _STATE_KEYS = [
-    "edit_turns",
+    "route_points",
     "_map_center", "_map_zoom",
     "_matched_points", "_mm_status", "_mm_n_snapped", "_mm_error",
     "_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial",
     "_proc_status",
-    "_trkpt_org_elevs", "_trkpt_fix_elevs", "_grade_org", "_grade_fix", "_elev_choice",
+    "_grade_org", "_grade_fix", "_elev_choice",
     "_elev_batch_idx", "_elev_partial", "_elev_cancel_requested",
     "_iname_status",  "_iname_n_found",
     "_focus_wpt_idx",
     "_map_event_ts",
-    "acpts",
-    "_active_points_edit",
     "_undo_state",
     "route_modified",
     "_rdp_done",
@@ -763,7 +832,7 @@ if raw_content:
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 
 # ─────────────────────────────────────────────
-# 自動処理（マップマッチング・標高補正）
+# 自動処理（マップマッチング）
 # ─────────────────────────────────────────────
 
 if st.session_state.get("_new_route_mode"):
@@ -853,137 +922,96 @@ if st.session_state.get("_mm_status") == "running":
             st.session_state["_mm_status"]      = "完了" if _n_sn > 0 else "エラー"
             for _k in ["_mm_chunk_idx", "_mm_matched_partial", "_mm_n_snapped_partial", "_mm_errors_partial"]:
                 st.session_state.pop(_k, None)
-            _active_mm = st.session_state["_matched_points"]
-            if "edit_turns" in st.session_state:
-                for _t in st.session_state["edit_turns"]:
-                    _tidx = _t.get("index", 0)
-                    if _tidx < len(_active_mm):
-                        _t["lat"] = _active_mm[_tidx][0]
-                        _t["lon"] = _active_mm[_tidx][1]
             st.rerun()
         else:
             st.session_state["_mm_chunk_idx"] = _ci + 1
             st.rerun()
 
-active_points = st.session_state.get("_matched_points", points)
-# acpt操作でtrkptが更新されていれば上書き
-if "_active_points_edit" in st.session_state:
-    active_points = st.session_state["_active_points_edit"]
+# ─────────────────────────────────────────────
+# route_points 初期化（初回のみ）
+# ─────────────────────────────────────────────
+
+if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_status") != "running":
+    _base_coords = list(st.session_state.get("_matched_points") or points or [])
+    rp = [make_route_point(lat, lon, changed=not _has_wpts) for lat, lon in _base_coords]
+    if rp:
+        rp[0]["is_acpt"] = True
+        rp[-1]["is_acpt"] = True
+        # org 標高処理
+        if gpx_parsed is not None:
+            _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
+                           for seg in tr.segments for p in seg.points]
+            if not all(e is None for e in _orig_elevs):
+                _org_cleaned, _ = clean_elevation_spikes(_base_coords, _orig_elevs)
+                for i, v in enumerate(_org_cleaned):
+                    if i < len(rp):
+                        rp[i]["ele_org"] = v
+                st.session_state["_grade_org"] = compute_grade_stats(_base_coords, _org_cleaned)
+            else:
+                st.session_state["_grade_org"] = None
+        else:
+            st.session_state["_grade_org"] = None
+        # wpt 初期化
+        if _has_wpts and gpx_parsed:
+            for wpt in gpx_parsed.waypoints:
+                delta = None
+                desc  = wpt.description or ""
+                if desc.startswith("bearing_change:"):
+                    try:
+                        delta = float(desc.split(":")[1])
+                    except ValueError:
+                        pass
+                idx = nearest_trkpt_index(wpt.latitude, wpt.longitude, _base_coords)
+                rp[idx]["wpt"] = {"name": wpt.name or "ターンポイント", "delta": delta}
+            st.session_state["_iname_status"] = "スキップ"
+        else:
+            _raw_turns = detect_turns(_base_coords, min_turn_angle=45, min_dist=100, smooth=1)
+            _inames = fetch_intersection_names(_raw_turns)
+            st.session_state["_iname_status"]  = "完了"
+            st.session_state["_iname_n_found"] = len(_inames)
+            for t in _raw_turns:
+                idx = t["index"]
+                rp[idx]["wpt"] = with_name({"name": "", "delta": t["delta"]}, _inames.get(idx))
+            if rp:
+                rp[0]["wpt"]  = {"name": "スタート", "delta": None}
+                rp[-1]["wpt"] = {"name": "ゴール",   "delta": None}
+        for p in rp:
+            p["changed"] = False
+    st.session_state["route_points"] = rp
+    st.session_state["_grade_fix"]   = None
+    st.session_state["_proc_status"] = "done"
+    _set_default_elev_choice()
+
+# 新規ルートモード（最初のクリック前）
+if st.session_state.get("_new_route_mode") and "route_points" not in st.session_state:
+    st.session_state["route_points"] = []
+    st.session_state["_grade_org"]   = None
+    st.session_state["_grade_fix"]   = None
+    st.session_state["_proc_status"] = "done"
+
+route_points = st.session_state.get("route_points", [])
 
 # 実走行データ：マップマッチング完了後にRDP間引き（1回のみ）
 if _is_actual_ride and not st.session_state.get("_rdp_done"):
     _mm_st = st.session_state.get("_mm_status")
-    if _mm_st in ("完了", "キャンセル", "スキップ") and st.session_state.get("_matched_points"):
-        _rdp_pts = st.session_state["_matched_points"]
-        _thinned = rdp_simplify([[p[0], p[1]] for p in _rdp_pts], epsilon=5.0)
-        st.session_state["_matched_points"] = [tuple(p) for p in _thinned]
+    if _mm_st in ("完了", "キャンセル", "スキップ") and route_points:
+        _coords_rdp = [[p["lat"], p["lon"]] for p in route_points]
+        _thinned = rdp_simplify(_coords_rdp, epsilon=5.0)
+        _thinned_set = {(c[0], c[1]) for c in _thinned}
+        st.session_state["route_points"] = [p for p in route_points if (p["lat"], p["lon"]) in _thinned_set]
+        route_points = st.session_state["route_points"]
         st.session_state["_rdp_done"] = True
-        active_points = st.session_state["_matched_points"]
-
-# ─────────────────────────────────────────────
-# 標高処理（org: 元GPX＋スパイク補正 / fix: GSI手動補正）
-# ─────────────────────────────────────────────
-
-def _set_default_elev_choice():
-    n = len(active_points)
-    def _complete(elevs):
-        return bool(elevs) and len(elevs) >= n and all(e is not None for e in elevs[:n])
-    _org_ok = _complete(st.session_state.get("_trkpt_org_elevs"))
-    _fix_ok = _complete(st.session_state.get("_trkpt_fix_elevs"))
-    if _org_ok and _fix_ok:
-        _go = st.session_state.get("_grade_org")
-        _gf = st.session_state.get("_grade_fix")
-        _so = (_go["max"] + abs(_go["min"])) if _go else float("inf")
-        _sf = (_gf["max"] + abs(_gf["min"])) if _gf else float("inf")
-        st.session_state["_elev_choice"] = "fix" if _sf < _so else "org"
-    elif _fix_ok:
-        st.session_state["_elev_choice"] = "fix"
-    else:
-        st.session_state["_elev_choice"] = "org"
-
-if st.session_state.get("_proc_status") is None:
-    # trkpt_org: 元GPX ele値 + スパイク補正（新規ルートモードはスキップ）
-    if gpx_parsed is not None:
-        _orig_elevs = [p.elevation for tr in gpx_parsed.tracks
-                       for seg in tr.segments for p in seg.points]
-        if all(e is None for e in _orig_elevs):
-            st.session_state["_trkpt_org_elevs"] = None
-            st.session_state["_grade_org"]       = None
-        else:
-            _org_cleaned, _ = clean_elevation_spikes(active_points, _orig_elevs)
-            st.session_state["_trkpt_org_elevs"] = _org_cleaned
-            st.session_state["_grade_org"]       = compute_grade_stats(active_points, _org_cleaned)
-    else:
-        st.session_state["_trkpt_org_elevs"] = None
-        st.session_state["_grade_org"]       = None
-
-    # GSI標高補正は手動ボタンで実行（自動実行しない）
-    st.session_state["_trkpt_fix_elevs"] = None
-    st.session_state["_grade_fix"]       = None
-    st.session_state["_proc_status"]     = "done"
-
 
 if _needs_rerun:
     st.rerun()
-
-# ─── ターン初期化（初回のみ）──────────────────
-if "edit_turns" not in st.session_state:
-    if st.session_state.get("_new_route_mode"):
-        st.session_state["edit_turns"] = []
-    elif _has_wpts and not _is_actual_ride:
-        turns = []
-        for wpt in gpx_parsed.waypoints:
-            delta = None
-            desc  = wpt.description or ""
-            if desc.startswith("bearing_change:"):
-                try:
-                    delta = float(desc.split(":")[1])
-                except ValueError:
-                    pass
-            idx = nearest_trkpt_index(wpt.latitude, wpt.longitude, points)
-            turns.append({
-                "lat":   wpt.latitude,
-                "lon":   wpt.longitude,
-                "delta": delta,
-                "index": idx,
-                "name":  wpt.name or "ターンポイント",
-            })
-        st.session_state["edit_turns"]    = turns
-        st.session_state["_iname_status"] = "スキップ"
-    else:
-        raw_turns = detect_turns(active_points, min_turn_angle=45, min_dist=100, smooth=1)
-        intersection_names = fetch_intersection_names(raw_turns)
-        st.session_state["_iname_status"]  = "完了"
-        st.session_state["_iname_n_found"] = len(intersection_names)
-        _mid_turns = [
-            with_name(t, intersection_names.get(t["index"]))
-            for t in raw_turns
-        ]
-        _s_wpt = {"lat": active_points[0][0],  "lon": active_points[0][1],
-                  "delta": None, "index": 0,                        "name": "スタート"}
-        _g_wpt = {"lat": active_points[-1][0], "lon": active_points[-1][1],
-                  "delta": None, "index": len(active_points) - 1,   "name": "ゴール"}
-        st.session_state["edit_turns"] = [_s_wpt] + _mid_turns + [_g_wpt]
-
-current_turns = st.session_state["edit_turns"]
-if "acpts" not in st.session_state:
-    if len(current_turns) >= 2:
-        _s_wpt, _g_wpt = current_turns[0], current_turns[-1]
-        st.session_state["acpts"] = [
-            {"lat": _s_wpt["lat"], "lng": _s_wpt["lon"], "trkpt_idx": _s_wpt["index"]},
-            {"lat": _g_wpt["lat"], "lng": _g_wpt["lon"], "trkpt_idx": _g_wpt["index"]},
-        ]
-    else:
-        st.session_state["acpts"] = []
-current_acpts = st.session_state["acpts"]
 
 if _has_wpts:
     st.info("📂 GPX内のターンポイントを読み込みました。マップマッチング・標高補正はスキップされています。")
 
 # ─── ルート情報 ───────────────────────────────
-dists_all = [haversine(active_points[i][0], active_points[i][1],
-                       active_points[i+1][0], active_points[i+1][1])
-             for i in range(len(active_points) - 1)]
+coords = [(p["lat"], p["lon"]) for p in route_points]
+dists_all = [haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
+             for i in range(len(coords) - 1)]
 avg_spacing   = np.mean(dists_all) if dists_all else 0.0
 total_dist_km = sum(dists_all) / 1000
 route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）") if gpx_parsed else "新規ルート"
@@ -1009,12 +1037,9 @@ else:
         st.session_state["_confirm_back"] = True
         st.rerun()
 
-_elevs_for_gain = (
-    st.session_state.get("_trkpt_fix_elevs")
-    if st.session_state.get("_elev_choice") == "fix"
-    else st.session_state.get("_trkpt_org_elevs")
-)
-if _elevs_for_gain:
+_elev_key = "ele_fix" if st.session_state.get("_elev_choice") == "fix" else "ele_org"
+_elevs_for_gain = [p[_elev_key] for p in route_points]
+if any(e is not None for e in _elevs_for_gain):
     _gain = sum(
         max(0, _elevs_for_gain[i+1] - _elevs_for_gain[i])
         for i in range(len(_elevs_for_gain) - 1)
@@ -1034,7 +1059,6 @@ c3.metric("獲得標高", _gain_str)
 # 地図 + リストパネル
 # ─────────────────────────────────────────────
 
-
 col_map, col_list = st.columns([2, 1])
 with col_map:
     st.subheader("🗺️ 地図プレビュー")
@@ -1042,25 +1066,31 @@ with col_map:
     if _saved_center:
         _map_center = _saved_center
         _force_center = _skip_map_center_save
-    elif active_points:
+    elif route_points:
+        _q = len(route_points) // 4
         _map_center = {
-            "lat": active_points[len(active_points) // 4][0],
-            "lng": active_points[len(active_points) // 4][1],
+            "lat": route_points[_q]["lat"],
+            "lng": route_points[_q]["lon"],
         }
         _force_center = True
     else:
         _map_center = {"lat": 35.681, "lng": 139.767}  # デフォルト（東京）
         _force_center = True
     _map_zoom = st.session_state.get("_map_zoom", 13)
+
+    _acpts_for_map = [
+        {"lat": p["lat"], "lng": p["lon"], "trkpt_idx": i}
+        for i, p in enumerate(route_points) if p["is_acpt"]
+    ]
     _wpts_for_map = [
-        {"lat": t["lat"], "lng": t["lon"], "trkpt_idx": t["index"],
-         "name": t["name"], "color": wpt_style(t)[1]}
-        for t in current_turns
+        {"lat": p["lat"], "lng": p["lon"], "trkpt_idx": i,
+         "name": p["wpt"]["name"], "color": wpt_style(p["wpt"])[1]}
+        for i, p in enumerate(route_points) if p["wpt"] is not None
     ]
     _map_event = render_map(
         data={
-            "trkpts": active_points,
-            "acpts": current_acpts,
+            "trkpts": coords,
+            "acpts": _acpts_for_map,
             "wpts": _wpts_for_map,
             "center": _map_center,
             "zoom": _map_zoom,
@@ -1070,12 +1100,7 @@ with col_map:
         key="gpx_map",
     )
 
-    _elev_fig = _render_elevation_profile(
-        active_points, dists_all,
-        st.session_state.get("_trkpt_org_elevs"),
-        st.session_state.get("_trkpt_fix_elevs"),
-        current_turns,
-    )
+    _elev_fig = _render_elevation_profile(route_points)
     if _elev_fig is not None:
         st.plotly_chart(_elev_fig, width="stretch", config={"displayModeBar": False})
 
@@ -1093,378 +1118,264 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
         _evt_type == "dialog_result" and _map_event.get("action") == "extend"
     ):
         _clat, _clng = _map_event["lat"], _map_event["lng"]
-        _acpts = list(st.session_state.get("acpts", []))
-        _cur_pts = list(active_points)
-        _turns = list(st.session_state.get("edit_turns", []))
+        rp = list(st.session_state.get("route_points", []))
+        _all_acpts = [(i, p) for i, p in enumerate(rp) if p["is_acpt"]]
 
-        # 前の境界点を決定（常にルート末尾。wptは使わない）
-        if _acpts:
-            _prev_pt = (_acpts[-1]["lat"], _acpts[-1]["lng"])
-        elif _cur_pts:
-            _prev_pt = tuple(_cur_pts[-1])
-        else:
-            _prev_pt = None
-
-        if _prev_pt is None:
+        if not _all_acpts:
             # 1点目クリック: スタートwptを作成してルート計算なし
-            _new_trkpts = [[_clat, _clng]]
-            _new_acpt_idx = 0
-            st.session_state["edit_turns"] = [
-                {"lat": _clat, "lon": _clng, "delta": None, "index": 0, "name": "スタート"}
-            ]
+            new_pt = make_route_point(
+                _clat, _clng,
+                is_acpt=True,
+                wpt={"name": "スタート", "delta": None},
+                changed=False,
+            )
+            st.session_state["route_points"] = [new_pt]
         else:
-            st.session_state["_undo_state"] = {
-                "acpts": list(_acpts),
-                "active_points": list(_cur_pts),
-                "edit_turns": list(_turns),
-            }
+            st.session_state["_undo_state"] = {"route_points": _deep_copy_rp(rp)}
+            _prev_pt = (rp[-1]["lat"], rp[-1]["lon"])
             _seg = calc_route_segment([_prev_pt, (_clat, _clng)])
-            _new_trkpts = _cur_pts + [list(p) for p in _seg[1:]]
-            _new_acpt_idx = len(_new_trkpts) - 1
-
-            # 旧ゴールを wpt リストから外す（acpt としては acpts に残る）
-            if _turns and _turns[-1].get("name") == "ゴール":
-                _turns = _turns[:-1]
-
-            # 新ゴールを wpt 末尾・acpt 末尾に追加
-            _g_wpt = {"lat": _clat, "lon": _clng, "delta": None,
-                      "index": _new_acpt_idx, "name": "ゴール"}
-            _turns = _turns + [_g_wpt]
-            st.session_state["edit_turns"] = _turns
-
-        _acpts.append({"lat": _clat, "lng": _clng, "trkpt_idx": _new_acpt_idx})
-        st.session_state["acpts"] = _acpts
-        st.session_state["_active_points_edit"] = _new_trkpts
+            # 旧ゴールwptを外す（そのtrkptはルート内点として残る）
+            if rp and rp[-1]["wpt"] is not None and rp[-1]["wpt"].get("name") == "ゴール":
+                rp[-1]["wpt"] = None
+            _seg_tail = _seg[1:]
+            new_seg_pts = [
+                make_route_point(lat, lon, is_acpt=(j == len(_seg_tail) - 1), changed=True)
+                for j, (lat, lon) in enumerate(_seg_tail)
+            ]
+            if new_seg_pts:
+                new_seg_pts[-1]["wpt"]    = {"name": "ゴール", "delta": None}
+                new_seg_pts[-1]["changed"] = False
+            st.session_state["route_points"] = rp + new_seg_pts
         st.session_state["route_modified"] = True
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
     elif _evt_type == "acpt_drag_end":
-        _ai       = _map_event.get("acpt_idx")
-        _new_lat  = _map_event["lat"]
-        _new_lng  = _map_event["lng"]
-        _acpts    = list(st.session_state.get("acpts", []))
-        _cur_pts  = list(active_points)
-        _turns    = list(st.session_state.get("edit_turns", []))
-        if _ai is not None and 0 <= _ai < len(_acpts):
-            st.session_state["_undo_state"] = {
-                "acpts": [dict(a) for a in _acpts],
-                "active_points": list(_cur_pts),
-                "edit_turns": [dict(t) for t in _turns],
-            }
+        _ai      = _map_event.get("acpt_idx")
+        _new_lat = _map_event["lat"]
+        _new_lng = _map_event["lng"]
+        rp = list(st.session_state.get("route_points", []))
+        _all_acpts = [(i, p) for i, p in enumerate(rp) if p["is_acpt"]]
+        if _ai is not None and 0 <= _ai < len(_all_acpts):
+            st.session_state["_undo_state"] = {"route_points": _deep_copy_rp(rp)}
+            _trkpt_idx = _all_acpts[_ai][0]
             _is_first = (_ai == 0)
-            _is_last  = (_ai == len(_acpts) - 1)
-            _old_idx  = _acpts[_ai]["trkpt_idx"]
+            _is_last  = (_ai == len(_all_acpts) - 1)
             _new_pos  = (_new_lat, _new_lng)
-            _n        = len(_cur_pts)
 
             if _is_first:
-                _nxt_idx = _adj_idx(_old_idx, _acpts, _turns, _n, 1)
-                _fwd     = calc_route_segment([_new_pos, tuple(_cur_pts[_nxt_idx])])
-                _new_trkpts = [list(p) for p in _fwd[:-1]] + _cur_pts[_nxt_idx:]
-                _delta   = (len(_fwd) - 1) - _nxt_idx
-                _acpts[0].update({"lat": _new_lat, "lng": _new_lng, "trkpt_idx": 0})
-                for i in range(1, len(_acpts)):
-                    _acpts[i]["trkpt_idx"] += _delta
-                _new_turns = []
-                for t in _turns:
-                    tidx = t.get("index", 0)
-                    if 0 < tidx < _nxt_idx:
-                        continue
-                    tc = dict(t)
-                    if tidx >= _nxt_idx:
-                        tc["index"] = tidx + _delta
-                    _new_turns.append(tc)
-                if _new_turns and _new_turns[0].get("name") == "スタート":
-                    _new_turns[0].update({"lat": _new_lat, "lon": _new_lng, "index": 0})
+                _nxt_idx = _next_boundary(_trkpt_idx, rp)
+                _seg = calc_route_segment([_new_pos, (rp[_nxt_idx]["lat"], rp[_nxt_idx]["lon"])])
+                new_pts = [
+                    make_route_point(lat, lon, is_acpt=(j == 0), changed=True)
+                    for j, (lat, lon) in enumerate(_seg[:-1])
+                ]
+                if new_pts:
+                    new_pts[0]["wpt"]    = {"name": "スタート", "delta": None}
+                    new_pts[0]["changed"] = False
+                rp[0:_nxt_idx] = new_pts
 
             elif _is_last:
-                _prev_idx = _adj_idx(_old_idx, _acpts, _turns, _n, -1)
-                _bwd      = calc_route_segment([tuple(_cur_pts[_prev_idx]), _new_pos])
-                _new_trkpts = _cur_pts[:_prev_idx + 1] + [list(p) for p in _bwd[1:]]
-                _new_g_idx  = len(_new_trkpts) - 1
-                _acpts[-1].update({"lat": _new_lat, "lng": _new_lng, "trkpt_idx": _new_g_idx})
-                _new_turns = [t for t in _turns if t.get("index", 0) <= _prev_idx]
-                if _new_turns and _new_turns[-1].get("name") == "ゴール":
-                    _new_turns[-1].update({"lat": _new_lat, "lon": _new_lng, "index": _new_g_idx})
-                else:
-                    _new_turns.append({"lat": _new_lat, "lon": _new_lng, "delta": None,
-                                       "index": _new_g_idx, "name": "ゴール"})
+                _prev_idx = _prev_boundary(_trkpt_idx, rp)
+                _seg = calc_route_segment([(rp[_prev_idx]["lat"], rp[_prev_idx]["lon"]), _new_pos])
+                _seg_tail = _seg[1:]
+                new_pts = [
+                    make_route_point(lat, lon, is_acpt=(j == len(_seg_tail) - 1), changed=True)
+                    for j, (lat, lon) in enumerate(_seg_tail)
+                ]
+                if new_pts:
+                    new_pts[-1]["wpt"]    = {"name": "ゴール", "delta": None}
+                    new_pts[-1]["changed"] = False
+                rp[_prev_idx+1:] = new_pts
 
             else:
-                _prev_idx = _adj_idx(_old_idx, _acpts, _turns, _n, -1)
-                _nxt_idx  = _adj_idx(_old_idx, _acpts, _turns, _n, 1)
-                _bwd = calc_route_segment([tuple(_cur_pts[_prev_idx]), _new_pos])
-                _fwd = calc_route_segment([_new_pos, tuple(_cur_pts[_nxt_idx])])
-                _new_mid    = [list(p) for p in _bwd[1:]] + [list(p) for p in _fwd[1:-1]]
-                _new_trkpts = _cur_pts[:_prev_idx + 1] + _new_mid + _cur_pts[_nxt_idx:]
-                _new_pos_idx = _prev_idx + len(_bwd) - 1
-                _new_nxt_idx = _new_pos_idx + len(_fwd) - 1
-                _delta       = _new_nxt_idx - _nxt_idx
-                _acpts[_ai].update({"lat": _new_lat, "lng": _new_lng, "trkpt_idx": _new_pos_idx})
-                for i in range(_ai + 1, len(_acpts)):
-                    _acpts[i]["trkpt_idx"] += _delta
-                _new_turns = []
-                for t in _turns:
-                    tidx = t.get("index", 0)
-                    if _prev_idx < tidx < _nxt_idx:
-                        continue
-                    tc = dict(t)
-                    if tidx >= _nxt_idx:
-                        tc["index"] = tidx + _delta
-                        if 0 <= tc["index"] < len(_new_trkpts):
-                            tc["lat"] = _new_trkpts[tc["index"]][0]
-                            tc["lon"] = _new_trkpts[tc["index"]][1]
-                    _new_turns.append(tc)
+                _prev_idx = _prev_boundary(_trkpt_idx, rp)
+                _nxt_idx  = _next_boundary(_trkpt_idx, rp)
+                _bwd = calc_route_segment([(rp[_prev_idx]["lat"], rp[_prev_idx]["lon"]), _new_pos])
+                _fwd = calc_route_segment([_new_pos, (rp[_nxt_idx]["lat"], rp[_nxt_idx]["lon"])])
+                new_pts = (
+                    [make_route_point(lat, lon, changed=True) for lat, lon in _bwd[1:]]
+                    + [make_route_point(lat, lon, changed=True) for lat, lon in _fwd[1:-1]]
+                )
+                # mark the dragged acpt position (_bwd[1:]の最後 = index len(_bwd)-2)
+                _acpt_pos_in_new = len(_bwd) - 2
+                if 0 <= _acpt_pos_in_new < len(new_pts):
+                    new_pts[_acpt_pos_in_new]["is_acpt"] = True
+                rp[_prev_idx+1:_nxt_idx] = new_pts
 
-            st.session_state["acpts"] = _acpts
-            st.session_state["_active_points_edit"] = _new_trkpts
-            st.session_state["edit_turns"] = _new_turns
+            st.session_state["route_points"] = rp
             st.session_state["route_modified"] = True
             st.session_state["_skip_map_center_save"] = True
             st.rerun()
 
     elif _evt_type == "acpt_delete":
-        _ai      = _map_event.get("acpt_idx")
-        _acpts   = list(st.session_state.get("acpts", []))
-        _cur_pts = list(active_points)
-        _turns   = list(st.session_state.get("edit_turns", []))
-        if _ai is not None and 0 <= _ai < len(_acpts):
-            st.session_state["_undo_state"] = {
-                "acpts": [dict(a) for a in _acpts],
-                "active_points": list(_cur_pts),
-                "edit_turns": [dict(t) for t in _turns],
-            }
-            if _ai == 0:
-                _old_s_idx    = _acpts[0]["trkpt_idx"]
-                _acpts_remain = _acpts[1:]
-                _turns_excl_s = [t for t in _turns if t.get("name") != "スタート"]
-                _n            = len(_cur_pts)
-                _has_next = (
-                    any(a["trkpt_idx"] > _old_s_idx for a in _acpts_remain) or
-                    any(t.get("index", 0) > _old_s_idx for t in _turns_excl_s)
-                )
-                if not _has_next:
-                    st.session_state["acpts"] = []
-                    st.session_state["edit_turns"] = []
-                    st.session_state["_active_points_edit"] = []
+        _ai  = _map_event.get("acpt_idx")
+        rp = list(st.session_state.get("route_points", []))
+        _all_acpts = [(i, p) for i, p in enumerate(rp) if p["is_acpt"]]
+        if _ai is not None and 0 <= _ai < len(_all_acpts):
+            st.session_state["_undo_state"] = {"route_points": _deep_copy_rp(rp)}
+            _trkpt_idx = _all_acpts[_ai][0]
+            _is_first  = (_ai == 0)
+            _is_last   = (_ai == len(_all_acpts) - 1)
+
+            if _is_first:
+                # 次の境界まで切り落とす
+                if len(_all_acpts) <= 1:
+                    # acptが1つだけ → ルート全消去
+                    st.session_state["route_points"] = []
                 else:
-                    _off = _adj_idx(_old_s_idx, _acpts_remain, _turns_excl_s, _n, 1)
-                    _boundary_is_acpt = any(a["trkpt_idx"] == _off for a in _acpts_remain)
-                    _new_trkpts = _cur_pts[_off:]
-                    _new_acpts  = [dict(a) for a in _acpts_remain]
-                    for a in _new_acpts:
-                        a["trkpt_idx"] -= _off
-                    _new_turns = []
-                    for t in _turns:
-                        if t.get("index", 0) <= _off or t.get("name") == "スタート":
-                            continue
-                        tc = dict(t); tc["index"] -= _off
-                        _new_turns.append(tc)
-                    if _boundary_is_acpt:
-                        _ns = next(a for a in _new_acpts if a["trkpt_idx"] == 0)
-                        _new_turns.insert(0, {"lat": _ns["lat"], "lon": _ns["lng"],
-                                              "delta": None, "index": 0, "name": "スタート"})
-                    else:
-                        _wpt_ns = next((t for t in _turns if t.get("index") == _off), None)
-                        _ns_lat = _wpt_ns["lat"] if _wpt_ns else float(_cur_pts[_off][0])
-                        _ns_lon = _wpt_ns["lon"] if _wpt_ns else float(_cur_pts[_off][1])
-                        _new_turns.insert(0, {"lat": _ns_lat, "lon": _ns_lon,
-                                              "delta": None, "index": 0, "name": "スタート"})
-                        _new_acpts.insert(0, {"lat": _ns_lat, "lng": _ns_lon, "trkpt_idx": 0})
-                    st.session_state["acpts"] = _new_acpts
-                    st.session_state["edit_turns"] = _new_turns
-                    st.session_state["_active_points_edit"] = _new_trkpts
-            elif _ai == len(_acpts) - 1:
-                _old_g_idx    = _acpts[-1]["trkpt_idx"]
-                _acpts_remain = _acpts[:-1]
-                _turns_excl_g = [t for t in _turns if t.get("name") != "ゴール"]
-                _n            = len(_cur_pts)
-                _has_prev = (
-                    any(a["trkpt_idx"] < _old_g_idx for a in _acpts_remain) or
-                    any(t.get("index", _n) < _old_g_idx for t in _turns_excl_g)
-                )
-                if not _has_prev:
-                    st.session_state["acpts"] = []
-                    st.session_state["edit_turns"] = []
-                    st.session_state["_active_points_edit"] = []
+                    _nxt_idx = _all_acpts[1][0]
+                    rp_new = rp[_nxt_idx:]
+                    # 新スタートにacptとwptを付ける
+                    if rp_new:
+                        rp_new[0]["is_acpt"] = True
+                        if rp_new[0]["wpt"] is None or rp_new[0]["wpt"].get("name") != "スタート":
+                            rp_new[0]["wpt"] = {"name": "スタート", "delta": None}
+                    st.session_state["route_points"] = rp_new
+
+            elif _is_last:
+                # 前の境界まで切り落とす
+                if len(_all_acpts) <= 1:
+                    st.session_state["route_points"] = []
                 else:
-                    _new_g_bdry   = _adj_idx(_old_g_idx, _acpts_remain, _turns_excl_g, _n, -1)
-                    _boundary_is_acpt = any(a["trkpt_idx"] == _new_g_bdry for a in _acpts_remain)
-                    _new_trkpts = _cur_pts[:_new_g_bdry + 1]
-                    _new_acpts  = [dict(a) for a in _acpts_remain]
-                    _new_turns  = [t for t in _turns
-                                   if t.get("index", 0) < _new_g_bdry and t.get("name") != "ゴール"]
-                    if _boundary_is_acpt:
-                        _ng = next(a for a in _new_acpts if a["trkpt_idx"] == _new_g_bdry)
-                        _new_turns.append({"lat": _ng["lat"], "lon": _ng["lng"],
-                                           "delta": None, "index": _new_g_bdry, "name": "ゴール"})
-                    else:
-                        _wpt_ng = next((t for t in _turns if t.get("index") == _new_g_bdry), None)
-                        _ng_lat = _wpt_ng["lat"] if _wpt_ng else float(_cur_pts[_new_g_bdry][0])
-                        _ng_lon = _wpt_ng["lon"] if _wpt_ng else float(_cur_pts[_new_g_bdry][1])
-                        _new_turns.append({"lat": _ng_lat, "lon": _ng_lon,
-                                           "delta": None, "index": _new_g_bdry, "name": "ゴール"})
-                        _new_acpts.append({"lat": _ng_lat, "lng": _ng_lon, "trkpt_idx": _new_g_bdry})
-                        _new_acpts.sort(key=lambda a: a["trkpt_idx"])
-                    st.session_state["acpts"] = _new_acpts
-                    st.session_state["edit_turns"] = _new_turns
-                    st.session_state["_active_points_edit"] = _new_trkpts
+                    _prev_idx = _all_acpts[-2][0]
+                    rp_new = rp[:_prev_idx + 1]
+                    if rp_new:
+                        rp_new[-1]["is_acpt"] = True
+                        if rp_new[-1]["wpt"] is None or rp_new[-1]["wpt"].get("name") != "ゴール":
+                            rp_new[-1]["wpt"] = {"name": "ゴール", "delta": None}
+                    st.session_state["route_points"] = rp_new
+
             else:
-                _old_idx  = _acpts[_ai]["trkpt_idx"]
-                _prev_idx = _adj_idx(_old_idx, _acpts, _turns, len(_cur_pts), -1)
-                _nxt_idx  = _adj_idx(_old_idx, _acpts, _turns, len(_cur_pts), 1)
-                _seg      = calc_route_segment([tuple(_cur_pts[_prev_idx]), tuple(_cur_pts[_nxt_idx])])
-                _new_mid  = [list(p) for p in _seg[1:-1]]
-                _new_trkpts = _cur_pts[:_prev_idx + 1] + _new_mid + _cur_pts[_nxt_idx:]
-                _new_nxt    = _prev_idx + len(_seg) - 1
-                _delta      = _new_nxt - _nxt_idx
-                _new_acpts  = []
-                for i, a in enumerate(_acpts):
-                    if i == _ai:
-                        continue
-                    ac = dict(a)
-                    if ac["trkpt_idx"] >= _nxt_idx:
-                        ac["trkpt_idx"] += _delta
-                    _new_acpts.append(ac)
-                _new_turns = []
-                for t in _turns:
-                    tidx = t.get("index", 0)
-                    if _prev_idx < tidx < _nxt_idx:
-                        continue
-                    tc = dict(t)
-                    if tidx >= _nxt_idx:
-                        tc["index"] = tidx + _delta
-                        if 0 <= tc["index"] < len(_new_trkpts):
-                            tc["lat"] = _new_trkpts[tc["index"]][0]
-                            tc["lon"] = _new_trkpts[tc["index"]][1]
-                    _new_turns.append(tc)
-                st.session_state["acpts"] = _new_acpts
-                st.session_state["edit_turns"] = _new_turns
-                st.session_state["_active_points_edit"] = _new_trkpts
+                # 中間acptを削除してセグメントを再計算
+                _prev_idx = _prev_boundary(_trkpt_idx, rp)
+                _nxt_idx  = _next_boundary(_trkpt_idx, rp)
+                _seg = calc_route_segment([(rp[_prev_idx]["lat"], rp[_prev_idx]["lon"]),
+                                           (rp[_nxt_idx]["lat"], rp[_nxt_idx]["lon"])])
+                new_mid = [make_route_point(lat, lon, changed=True) for lat, lon in _seg[1:-1]]
+                rp[_prev_idx+1:_nxt_idx] = new_mid
+                st.session_state["route_points"] = rp
+
             st.session_state["route_modified"] = True
             st.session_state["_skip_map_center_save"] = True
             st.rerun()
 
     elif _evt_type == "dialog_result" and _map_event.get("action") == "acpt":
         _near_idx = _map_event.get("nearest_trkpt_idx", 0)
-        _acpts    = list(st.session_state.get("acpts", []))
-        _cur_pts  = list(active_points)
-        _turns    = list(st.session_state.get("edit_turns", []))
-        _near_pos = (float(_cur_pts[_near_idx][0]), float(_cur_pts[_near_idx][1]))
-        _prev_idx = _adj_idx(_near_idx, _acpts, _turns, len(_cur_pts), -1)
-        _nxt_idx  = _adj_idx(_near_idx, _acpts, _turns, len(_cur_pts), 1)
-        st.session_state["_undo_state"] = {
-            "acpts": [dict(a) for a in _acpts],
-            "active_points": list(_cur_pts),
-            "edit_turns": [dict(t) for t in _turns],
-        }
-        _seg1 = calc_route_segment([tuple(_cur_pts[_prev_idx]), _near_pos])
-        _seg2 = calc_route_segment([_near_pos, tuple(_cur_pts[_nxt_idx])])
-        _new_mid    = [list(p) for p in _seg1[1:]] + [list(p) for p in _seg2[1:-1]]
-        _new_trkpts = _cur_pts[:_prev_idx + 1] + _new_mid + _cur_pts[_nxt_idx:]
-        _new_near   = _prev_idx + len(_seg1) - 1
-        _new_nxt    = _new_near + len(_seg2) - 1
-        _delta      = _new_nxt - _nxt_idx
-        _new_acpts  = []
-        for a in _acpts:
-            ac = dict(a)
-            if ac["trkpt_idx"] >= _nxt_idx:
-                ac["trkpt_idx"] += _delta
-            _new_acpts.append(ac)
-        _new_acpts.append({"lat": _near_pos[0], "lng": _near_pos[1], "trkpt_idx": _new_near})
-        _new_acpts.sort(key=lambda x: x["trkpt_idx"])
-        _new_turns = []
-        for t in _turns:
-            tidx = t.get("index", 0)
-            if _prev_idx < tidx < _nxt_idx:
-                continue
-            tc = dict(t)
-            if tidx >= _nxt_idx:
-                tc["index"] = tidx + _delta
-                if 0 <= tc["index"] < len(_new_trkpts):
-                    tc["lat"] = _new_trkpts[tc["index"]][0]
-                    tc["lon"] = _new_trkpts[tc["index"]][1]
-            _new_turns.append(tc)
-        st.session_state["acpts"] = _new_acpts
-        st.session_state["edit_turns"] = _new_turns
-        st.session_state["_active_points_edit"] = _new_trkpts
+        rp = list(st.session_state.get("route_points", []))
+        st.session_state["_undo_state"] = {"route_points": _deep_copy_rp(rp)}
+        _near_pos = (rp[_near_idx]["lat"], rp[_near_idx]["lon"])
+        _prev_idx = _prev_boundary(_near_idx, rp)
+        _nxt_idx  = _next_boundary(_near_idx, rp)
+        _seg1 = calc_route_segment([(rp[_prev_idx]["lat"], rp[_prev_idx]["lon"]), _near_pos])
+        _seg2 = calc_route_segment([_near_pos, (rp[_nxt_idx]["lat"], rp[_nxt_idx]["lon"])])
+        new_pts = (
+            [make_route_point(lat, lon, changed=True) for lat, lon in _seg1[1:]]
+            + [make_route_point(lat, lon, changed=True) for lat, lon in _seg2[1:-1]]
+        )
+        # mark the new acpt position (_seg1[1:]の最後 = index len(_seg1)-2)
+        _new_acpt_pos = len(_seg1) - 2
+        if 0 <= _new_acpt_pos < len(new_pts):
+            new_pts[_new_acpt_pos]["is_acpt"] = True
+        rp[_prev_idx+1:_nxt_idx] = new_pts
+        st.session_state["route_points"] = rp
         st.session_state["route_modified"] = True
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
     elif _evt_type == "dialog_result" and _map_event.get("action") == "wpt":
         _near_idx = _map_event.get("nearest_trkpt_idx", 0)
-        _cur_pts  = list(active_points)
-        _turns    = list(st.session_state.get("edit_turns", []))
-        if not any(t.get("index") == _near_idx for t in _turns):
-            if 1 <= _near_idx < len(_cur_pts) - 1:
-                _bi = calculate_bearing(_cur_pts[_near_idx-1][0], _cur_pts[_near_idx-1][1],
-                                        _cur_pts[_near_idx][0],   _cur_pts[_near_idx][1])
-                _bo = calculate_bearing(_cur_pts[_near_idx][0],   _cur_pts[_near_idx][1],
-                                        _cur_pts[_near_idx+1][0], _cur_pts[_near_idx+1][1])
+        rp = list(st.session_state.get("route_points", []))
+        if rp[_near_idx]["wpt"] is None:
+            if 1 <= _near_idx < len(rp) - 1:
+                _bi = calculate_bearing(rp[_near_idx-1]["lat"], rp[_near_idx-1]["lon"],
+                                        rp[_near_idx]["lat"],   rp[_near_idx]["lon"])
+                _bo = calculate_bearing(rp[_near_idx]["lat"],   rp[_near_idx]["lon"],
+                                        rp[_near_idx+1]["lat"], rp[_near_idx+1]["lon"])
                 _delta = angle_diff(_bi, _bo)
             else:
                 _delta = None
-            _tmp = {"lat": _cur_pts[_near_idx][0], "lon": _cur_pts[_near_idx][1],
-                    "delta": _delta, "index": _near_idx}
+            _tmp = {"lat": rp[_near_idx]["lat"], "lon": rp[_near_idx]["lon"],
+                    "index": _near_idx, "delta": _delta}
             _inames = fetch_intersection_names([_tmp], radius=20)
             _iname  = _inames.get(_near_idx)
             if _delta is not None:
-                _new_wpt = with_name(_tmp, _iname)
+                _wpt_info = with_name({"name": "", "delta": _delta}, _iname)
             elif _iname:
-                _new_wpt = {**_tmp, "name": _iname}
+                _wpt_info = {"name": _iname, "delta": None}
             else:
-                _spot = fetch_spot_name(_tmp["lat"], _tmp["lon"], radius=20)
-                _new_wpt = {**_tmp, "name": f"「{_spot}」" if _spot else "追加したターンポイント"}
-            st.session_state["edit_turns"] = sorted(_turns + [_new_wpt], key=lambda t: t["index"])
+                _spot = fetch_spot_name(rp[_near_idx]["lat"], rp[_near_idx]["lon"], radius=20)
+                _wpt_info = {"name": f"「{_spot}」" if _spot else "追加したターンポイント", "delta": None}
+            rp[_near_idx]["wpt"] = _wpt_info
+            st.session_state["route_points"] = rp
         st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
     elif _evt_type == "wpt_click":
         _wpt_idx = _map_event.get("wpt_idx")
-        if _wpt_idx is not None and 0 <= _wpt_idx < len(current_turns):
+        current_wpts_list = [(i, p) for i, p in enumerate(route_points) if p["wpt"] is not None]
+        if _wpt_idx is not None and 0 <= _wpt_idx < len(current_wpts_list):
+            _wi, _wp = current_wpts_list[_wpt_idx]
             st.session_state["_focus_wpt_idx"] = _wpt_idx
             st.session_state["_map_center"] = {
-                "lat": current_turns[_wpt_idx]["lat"],
-                "lng": current_turns[_wpt_idx]["lon"],
+                "lat": _wp["lat"],
+                "lng": _wp["lon"],
             }
             st.session_state["_skip_map_center_save"] = True
         st.rerun()
 
-# 手動編集した名前を edit_turns に同期（rerun で widget state が消える前に保持）
-for _sync_t in st.session_state.get("edit_turns", []):
-    _sync_key = f"wpt_name_{_sync_t['index']}"
+# wpt 名称をwidget stateから同期
+route_points = st.session_state.get("route_points", [])
+for i, p in enumerate(route_points):
+    if p["wpt"] is None:
+        continue
+    _sync_key = f"wpt_name_{i}"
     if _sync_key in st.session_state:
-        _sync_t["name"] = st.session_state[_sync_key]
+        p["wpt"]["name"] = st.session_state[_sync_key]
 
 
 # ─── 右パネル（リスト） ───────────────────────
 with col_list:
-    st.subheader(f"📋 ターンポイント一覧　({len(current_turns)}件)")
+    current_wpts = [(i, p) for i, p in enumerate(route_points) if p["wpt"] is not None]
+    st.subheader(f"📋 ターンポイント一覧　({len(current_wpts)}件)")
 
     _wpt_detect_col, _undo_col = st.columns([2, 1])
     with _wpt_detect_col:
         if st.button("🔍 ターンポイント検出", use_container_width=True,
                      help="ルート上のターンを検出してナビ案内点を設定します"):
-            _raw = detect_turns(list(active_points), min_turn_angle=45, min_dist=100, smooth=1)
-            _inames = fetch_intersection_names(_raw)
-            _mid = [with_name(t, _inames.get(t["index"])) for t in _raw]
-            _s_wpt = current_turns[0]
-            _g_wpt = current_turns[-1]
-            st.session_state["edit_turns"] = [_s_wpt] + _mid + [_g_wpt]
-            st.session_state["route_modified"] = False
+            _changed_idx = [i for i, p in enumerate(route_points) if p["changed"]]
+            if _changed_idx:
+                for _rstart, _rend in _contiguous_ranges(_changed_idx):
+                    _sub = [(p["lat"], p["lon"]) for p in route_points[_rstart:_rend+1]]
+                    _raw = detect_turns(_sub, min_turn_angle=45, min_dist=100, smooth=1)
+                    _cands = [
+                        {"lat": route_points[_rstart + t["index"]]["lat"],
+                         "lon": route_points[_rstart + t["index"]]["lon"],
+                         "index": _rstart + t["index"],
+                         "delta": t["delta"]}
+                        for t in _raw
+                    ]
+                    _inames_det = fetch_intersection_names(_cands)
+                    for _ct in _cands:
+                        _cidx = _ct["index"]
+                        if route_points[_cidx]["wpt"] is None:
+                            route_points[_cidx]["wpt"] = with_name(
+                                {"name": "", "delta": _ct["delta"]},
+                                _inames_det.get(_cidx)
+                            )
+                for p in route_points:
+                    p["changed"] = False
+                st.session_state["route_points"] = route_points
+                st.session_state["route_modified"] = False
             st.rerun()
     with _undo_col:
         if st.button("↩ 戻す", use_container_width=True,
                      disabled=("_undo_state" not in st.session_state),
                      help="直前の操作を元に戻す（1回のみ）"):
             _us = st.session_state.pop("_undo_state")
-            st.session_state["acpts"] = _us["acpts"]
-            st.session_state["_active_points_edit"] = _us["active_points"]
-            st.session_state["edit_turns"] = _us["edit_turns"]
+            st.session_state["route_points"] = _us["route_points"]
             st.rerun()
-    if st.session_state.get("route_modified") and current_turns:
+    if st.session_state.get("route_modified") and current_wpts:
         st.warning("ルートが変更されています。ターンポイント検出を実行してください。", icon="⚠️")
 
     st.markdown("""<style>
@@ -1486,38 +1397,39 @@ with col_list:
     </style>""", unsafe_allow_html=True)
 
     with st.container(height=520):
-        if not current_turns:
+        if not current_wpts:
             st.info("ターンポイントがありません。")
 
-        for i, t in enumerate(current_turns):
-            arrow, hex_color = wpt_style(t)
-            delta = t.get("delta")
+        for list_idx, (trkpt_idx, p) in enumerate(current_wpts):
+            winfo = p["wpt"]
+            arrow, hex_color = wpt_style(winfo)
+            delta = winfo.get("delta")
             badge = f"{delta:+.1f}°" if delta is not None else "手動"
-            _lat, _lng, _tidx = t["lat"], t["lon"], t["index"]
             col_c, col_n, col_d = st.columns([3, 5, 1])
             with col_c:
                 if st.button(
-                    f"{i+1} | {arrow} | trkpt: {_tidx}",
-                    key=f"center_{i}",
+                    f"{list_idx+1} | {arrow} | trkpt: {trkpt_idx}",
+                    key=f"center_{list_idx}",
                     use_container_width=True,
                     help="地図を移動",
                 ):
-                    st.session_state["_map_center"] = {"lat": _lat, "lng": _lng}
-                    st.session_state["_focus_wpt_idx"] = i
+                    st.session_state["_map_center"] = {"lat": p["lat"], "lng": p["lon"]}
+                    st.session_state["_focus_wpt_idx"] = list_idx
                     st.session_state["_skip_map_center_save"] = True
                     st.rerun()
             with col_n:
-                _wkey = f"wpt_name_{t['index']}"
+                _wkey = f"wpt_name_{trkpt_idx}"
                 if _wkey not in st.session_state:
-                    st.session_state[_wkey] = t["name"]
+                    st.session_state[_wkey] = winfo["name"]
                 st.text_input(
                     "名前",
                     key=_wkey,
                     label_visibility="collapsed",
                 )
             with col_d:
-                if st.button("🗑", key=f"del_{i}", help="削除"):
-                    st.session_state["edit_turns"].pop(i)
+                if st.button("🗑", key=f"del_{list_idx}", help="削除"):
+                    route_points[trkpt_idx]["wpt"] = None
+                    st.session_state["route_points"] = route_points
                     st.rerun()
 
         _focus_wpt_idx = st.session_state.pop("_focus_wpt_idx", None)
@@ -1544,14 +1456,24 @@ with col_list:
 
 st.divider()
 @st.dialog("💾 GPXを保存")
-def _save_gpx_dialog(active_pts, raw, turns, org_ok, fix_ok, elev_choice):
+def _save_gpx_dialog(route_points, elev_choice):
+    # wpt名称を最新のwidget stateで同期
+    for i, p in enumerate(route_points):
+        if p["wpt"] is not None:
+            key = f"wpt_name_{i}"
+            if key in st.session_state:
+                p["wpt"]["name"] = st.session_state[key]
+
+    org_ok = bool(route_points) and all(p["ele_org"] is not None for p in route_points)
+    fix_ok = bool(route_points) and all(p["ele_fix"] is not None for p in route_points)
+    current_wpts_count = sum(1 for p in route_points if p["wpt"] is not None)
     route_modified = st.session_state.get("route_modified")
 
     # ── ステータス表示 ──────────────────────────────
     if route_modified:
         st.markdown("**ターンポイント** ⚠️ 未確定（ルート変更後に再検出を推奨）")
     else:
-        st.markdown(f"**ターンポイント** ✅ 設定済み（{len(turns)} 個）")
+        st.markdown(f"**ターンポイント** ✅ 設定済み（{current_wpts_count} 個）")
 
     if org_ok or fix_ok:
         st.markdown("**標高** ✅ 設定済み")
@@ -1571,21 +1493,11 @@ def _save_gpx_dialog(active_pts, raw, turns, org_ok, fix_ok, elev_choice):
                 .replace(".gpx", "") or "new_route") + "_turns"
     _fname = st.text_input("ファイル名", value=_default, key="_dialog_fname")
 
-    # ── GPX事前生成 ────────────────────────────────
-    _turns_for_build = []
-    for _t in turns:
-        _tc = dict(_t)
-        _tc["name"] = st.session_state.get(f"wpt_name_{_t['index']}", _t.get("name", "ターンポイント"))
-        _turns_for_build.append(_tc)
-    _out_elevs = (
-        st.session_state.get("_trkpt_fix_elevs") if elev_choice == "fix"
-        else st.session_state.get("_trkpt_org_elevs")
-    )
+    # ── GPX生成 ────────────────────────────────────
     _xml = build_enhanced_gpx(
-        raw,
-        _turns_for_build,
-        matched_points=st.session_state.get("_matched_points") or list(active_pts),
-        elevations=_out_elevs,
+        st.session_state.get("_raw_gpx"),
+        route_points,
+        elev_choice,
     )
 
     # ── ボタン行 ───────────────────────────────────
@@ -1611,8 +1523,9 @@ def _save_gpx_dialog(active_pts, raw, turns, org_ok, fix_ok, elev_choice):
 st.markdown("#### 💾 GPXの出力")
 
 # ── 標高設定（面取り矩形） ─────────────────────────
-_org_ok = False
-_fix_ok = False
+_org_ok = bool(route_points) and all(p["ele_org"] is not None for p in route_points)
+_fix_ok = bool(route_points) and all(p["ele_fix"] is not None for p in route_points)
+
 with st.container():
     st.markdown('<span class="elev-section-marker" style="display:none"></span>', unsafe_allow_html=True)
     st.markdown("""<style>
@@ -1624,7 +1537,7 @@ with st.container():
     }
     </style>""", unsafe_allow_html=True)
     if st.session_state.get("_proc_status") == "running_fix":
-        _en         = len(active_points)
+        _en         = len(route_points)
         _E_BATCH    = 50
         _en_batches = math.ceil(_en / _E_BATCH)
         _ebi        = st.session_state.get("_elev_batch_idx", 0)
@@ -1652,16 +1565,20 @@ with st.container():
                 st.session_state["_elev_cancel_requested"] = True
                 st.rerun()
 
-        def _finalize_fix(gsi_elevs, cancelled=False):
-            if cancelled:
-                st.session_state["_trkpt_fix_elevs"] = None
-                st.session_state["_grade_fix"]       = None
+        def _finalize_fix(partial_list, cancelled=False):
+            rp = st.session_state.get("route_points", [])
+            if not cancelled and partial_list:
+                _coords_fix = [(p["lat"], p["lon"]) for p in rp]
+                _fix_cleaned, _ = clean_elevation_spikes(_coords_fix, partial_list)
+                for i, v in enumerate(_fix_cleaned):
+                    if i < len(rp):
+                        rp[i]["ele_fix"] = v
+                st.session_state["_grade_fix"] = compute_grade_stats(_coords_fix, _fix_cleaned)
             else:
-                _fix_cleaned, _ = clean_elevation_spikes(active_points, gsi_elevs)
-                st.session_state["_trkpt_fix_elevs"] = _fix_cleaned
-                st.session_state["_grade_fix"]       = compute_grade_stats(active_points, _fix_cleaned)
-                if st.session_state.get("_grade_org") is None:
-                    st.session_state["_elev_choice"] = "fix"
+                for p in rp:
+                    p["ele_fix"] = None
+                st.session_state["_grade_fix"] = None
+            st.session_state["route_points"] = rp
             for _ek in ["_elev_batch_idx", "_elev_partial", "_elev_retry_idxs"]:
                 st.session_state.pop(_ek, None)
             st.session_state["_proc_status"] = "done"
@@ -1698,9 +1615,10 @@ with st.container():
             _retry_idxs = st.session_state.pop("_elev_retry_idxs", None)
             _is_retry   = _retry_idxs is not None
             _etasks = (
-                [(_ei, active_points[_ei][0], active_points[_ei][1]) for _ei in _retry_idxs]
+                [(_ei, route_points[_ei]["lat"], route_points[_ei]["lon"]) for _ei in _retry_idxs]
                 if _is_retry
-                else [(_es + i, lat, lon) for i, (lat, lon) in enumerate(active_points[_es:_ee])]
+                else [(_es + i, route_points[_es + i]["lat"], route_points[_es + i]["lon"])
+                      for i in range(_ee - _es)]
             )
             _edone      = [0]
             _econfirmed = [0]
@@ -1740,18 +1658,11 @@ with st.container():
                 st.session_state["_elev_batch_idx"] = _ebi + 1
             st.rerun()
     else:
-        _gsi_disabled = not (active_points and _is_in_japan(active_points[0][0], active_points[0][1]))
-        _n_pts = len(active_points)
-
-        def _is_complete(elevs):
-            if not elevs or len(elevs) < _n_pts:
-                return False
-            return all(e is not None for e in elevs[:_n_pts])
+        _gsi_disabled = not (route_points and _is_in_japan(route_points[0]["lat"], route_points[0]["lon"]))
+        _n_pts = len(route_points)
 
         _go = st.session_state.get("_grade_org")
         _gf = st.session_state.get("_grade_fix")
-        _org_ok = _is_complete(st.session_state.get("_trkpt_org_elevs"))
-        _fix_ok = _is_complete(st.session_state.get("_trkpt_fix_elevs"))
         _candidates = ([k for k, ok in [("org", _org_ok), ("fix", _fix_ok)] if ok])
 
         if len(_candidates) == 0:
@@ -1770,12 +1681,15 @@ with st.container():
                      help="日本国内のルートのみ対応。実行後にGSI補正データを選択できます。"):
             st.session_state["_proc_status"]    = "running_fix"
             st.session_state["_elev_batch_idx"] = 0
-            st.session_state["_elev_partial"]   = [None] * len(active_points)
-            st.session_state.pop("_trkpt_fix_elevs", None)
+            st.session_state["_elev_partial"]   = [None] * len(route_points)
+            # ele_fix をリセット
+            for p in route_points:
+                p["ele_fix"] = None
+            st.session_state["route_points"] = route_points
             st.session_state.pop("_grade_fix", None)
             st.rerun()
 
-        if st.session_state.get("_proc_status") == "done" and active_points:
+        if st.session_state.get("_proc_status") == "done" and route_points:
             def _grade_label(key, grade):
                 if key == "fix" and not _fix_ok:
                     return "国土地理院補正（実施前）"
@@ -1809,9 +1723,9 @@ _choice = st.session_state.get("_elev_choice", "org")
 _applied = []
 if st.session_state.get("_mm_status") == "完了":
     _applied.append("🗺️ マップマッチング済み")
-if _choice == "fix" and st.session_state.get("_trkpt_fix_elevs") is not None:
+if _choice == "fix" and _fix_ok:
     _applied.append("⛰️ 標高補正済み（国土地理院）")
-elif _choice == "org" and st.session_state.get("_trkpt_org_elevs") is not None:
+elif _choice == "org" and _org_ok:
     _applied.append("⛰️ 標高補正済み（元データ）")
 
 _col_applied, _col_btn = st.columns([3, 1])
@@ -1820,8 +1734,8 @@ with _col_applied:
         st.caption("出力に適用: " + " ／ ".join(_applied))
 with _col_btn:
     if st.button("💾 GPXを保存", type="primary",
-                 use_container_width=True, disabled=(len(current_turns) == 0)):
+                 use_container_width=True, disabled=(len(current_wpts) == 0)):
         st.session_state["_save_dialog"] = True
 
 if st.session_state.get("_save_dialog"):
-    _save_gpx_dialog(active_points, raw_content, current_turns, _org_ok, _fix_ok, _choice)
+    _save_gpx_dialog(route_points, _choice)
