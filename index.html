@@ -358,7 +358,7 @@ async function handleFileImport(event) {
   const route = { name: parsed.name, distKm: (totalDist/1000).toFixed(1), track: parsed.track, turns: buildWptTrkMapping(parsed.track, parsed.turns), importedAt: Date.now() };
   await dbSave(route);
   await renderRouteList();
-  showToast(`「${route.name}」を追加 (${parsed.turns.length}ターン)`);
+  showToast(`「${route.name}」を追加 (${Math.max(0, parsed.turns.length - 2)}ターン)`);
 
   const prog = document.getElementById('import-progress');
   const msg  = document.getElementById('import-msg');
@@ -383,7 +383,7 @@ async function renderRouteList() {
       <div class="route-icon">🚴</div>
       <div class="route-info">
         <div class="route-name">${escHtml(r.name)}</div>
-        <div class="route-meta"><span>${r.distKm} km</span> &nbsp;|&nbsp; ターン ${r.turns.length}件</div>
+        <div class="route-meta"><span>${r.distKm} km</span> &nbsp;|&nbsp; ターン ${Math.max(0, r.turns.length - 2)}件</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
         <label onclick="event.stopPropagation()" style="display:flex;align-items:center;gap:5px;cursor:pointer;color:#aaa;font-size:13px;white-space:nowrap">
@@ -745,12 +745,13 @@ async function startNavigation(routeId, isReverse = false) {
 
   // ウェイポイント配列を構築：GPX順のターン + ゴールセンチネル
   // trkpt へのマッピング不要。座標をそのまま使う。
+  const navTurns = currentRoute.turns.slice(1, -1);
+  const goalWpt  = currentRoute.turns[currentRoute.turns.length - 1];
   waypoints = [
-    ...currentRoute.turns.map(t => ({
+    ...navTurns.map(t => ({
       lat: t.lat, lon: t.lon, name: t.name, bearingChange: t.bearingChange, isGoal: false, trkIdx: t.trkIdx
     })),
-    { lat: track[track.length - 1].lat, lon: track[track.length - 1].lon,
-      name: 'ゴール', isGoal: true }
+    { lat: goalWpt.lat, lon: goalWpt.lon, name: 'ゴール', isGoal: true }
   ];
   targetIdx = 0;
 
