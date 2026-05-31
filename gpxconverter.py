@@ -21,7 +21,7 @@ import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
 st.markdown(f'# 🚴 gpx-navi エディター <span style="font-size:0.35em; color:#9ca3af; font-weight:normal; vertical-align:middle;">v{APP_VERSION}</span>', unsafe_allow_html=True)
@@ -650,10 +650,8 @@ _STATE_KEYS = [
     "_active_points_edit",
     "_undo_state",
     "route_modified",
-    "_confirm_generate",
     "_rdp_done",
-    "_confirm_no_elev",
-    "_auto_generate_after_elev",
+    "_save_dialog",
     "_confirm_back",
     "_raw_gpx",
     "_gpx_filename",
@@ -1545,6 +1543,71 @@ with col_list:
 # ─────────────────────────────────────────────
 
 st.divider()
+@st.dialog("💾 GPXを保存")
+def _save_gpx_dialog(active_pts, raw, turns, org_ok, fix_ok, elev_choice):
+    route_modified = st.session_state.get("route_modified")
+
+    # ── ステータス表示 ──────────────────────────────
+    if route_modified:
+        st.markdown("**ターンポイント** ⚠️ 未確定（ルート変更後に再検出を推奨）")
+    else:
+        st.markdown(f"**ターンポイント** ✅ 設定済み（{len(turns)} 個）")
+
+    if org_ok or fix_ok:
+        st.markdown("**標高** ✅ 設定済み")
+    else:
+        st.markdown("**標高** ⚠️ データなし")
+
+    if route_modified or (not org_ok and not fix_ok):
+        st.warning(
+            "未設定区間があります。"
+            "「ターンポイントの検出」「国土地理院で標高補正」を行ってから保存することを推奨します。"
+        )
+
+    st.divider()
+
+    # ── ファイル名入力 ──────────────────────────────
+    _default = (st.session_state.get("_gpx_filename", "new_route")
+                .replace(".gpx", "") or "new_route") + "_turns"
+    _fname = st.text_input("ファイル名", value=_default, key="_dialog_fname")
+
+    # ── GPX事前生成 ────────────────────────────────
+    _turns_for_build = []
+    for _t in turns:
+        _tc = dict(_t)
+        _tc["name"] = st.session_state.get(f"wpt_name_{_t['index']}", _t.get("name", "ターンポイント"))
+        _turns_for_build.append(_tc)
+    _out_elevs = (
+        st.session_state.get("_trkpt_fix_elevs") if elev_choice == "fix"
+        else st.session_state.get("_trkpt_org_elevs")
+    )
+    _xml = build_enhanced_gpx(
+        raw,
+        _turns_for_build,
+        matched_points=st.session_state.get("_matched_points") or list(active_pts),
+        elevations=_out_elevs,
+    )
+
+    # ── ボタン行 ───────────────────────────────────
+    _dc1, _dc2 = st.columns(2)
+    with _dc1:
+        if st.button("キャンセル", use_container_width=True, key="_dialog_cancel"):
+            st.session_state.pop("_save_dialog", None)
+            st.rerun()
+    with _dc2:
+        if st.download_button(
+            "⬇️ ダウンロード",
+            data=_xml,
+            file_name=f"{_fname}.gpx",
+            mime="application/gpx+xml",
+            type="primary",
+            use_container_width=True,
+            key="_dialog_dl",
+        ):
+            st.session_state.pop("_save_dialog", None)
+            st.rerun()
+
+
 st.markdown("#### 💾 GPXの出力")
 
 # ── 標高設定（面取り矩形） ─────────────────────────
@@ -1751,75 +1814,14 @@ if _choice == "fix" and st.session_state.get("_trkpt_fix_elevs") is not None:
 elif _choice == "org" and st.session_state.get("_trkpt_org_elevs") is not None:
     _applied.append("⛰️ 標高補正済み（元データ）")
 
-_do_generate = False
+_col_applied, _col_btn = st.columns([3, 1])
+with _col_applied:
+    if _applied:
+        st.caption("出力に適用: " + " ／ ".join(_applied))
+with _col_btn:
+    if st.button("💾 GPXを保存", type="primary",
+                 use_container_width=True, disabled=(len(current_turns) == 0)):
+        st.session_state["_save_dialog"] = True
 
-# 標高データなし警告ダイアログ
-if st.session_state.get("_confirm_no_elev"):
-    st.warning("⚠️ 標高が含まれていないルート上の点があります。標高補正してから出力することをお勧めします。")
-    _cne1, _cne2, _ = st.columns([1, 1, 2])
-    with _cne1:
-        if st.button("❌ キャンセル"):
-            st.session_state.pop("_confirm_no_elev", None)
-            st.rerun()
-    with _cne2:
-        if st.button("📥 このまま生成"):
-            st.session_state.pop("_confirm_no_elev", None)
-            _do_generate = True
-
-# route_modified 警告ダイアログ
-elif st.session_state.get("_confirm_generate"):
-    st.warning("⚠️ 出力前にターンポイントの検出・編集を行うことをお勧めします。")
-    _cg1, _cg2, _ = st.columns([1, 1, 2])
-    with _cg1:
-        if st.button("✅ 続行", type="primary"):
-            st.session_state.pop("_confirm_generate", None)
-            _do_generate = True
-    with _cg2:
-        if st.button("❌ キャンセル"):
-            st.session_state.pop("_confirm_generate", None)
-            st.rerun()
-
-# ── 適用済みタグ＋生成ボタン（同一行） ──────────────
-else:
-    _col_applied, _col_btn = st.columns([3, 1])
-    with _col_applied:
-        if _applied:
-            st.caption("出力に適用: " + " ／ ".join(_applied))
-    with _col_btn:
-        if st.button("📥 GPXを生成", type="primary",
-                     use_container_width=True, disabled=(len(current_turns) == 0)):
-            if st.session_state.get("route_modified"):
-                st.session_state["_confirm_generate"] = True
-                st.rerun()
-            elif not _org_ok and not _fix_ok:
-                st.session_state["_confirm_no_elev"] = True
-                st.rerun()
-            else:
-                _do_generate = True
-
-if _do_generate:
-    turns_for_build = []
-    for t in current_turns:
-        tc = dict(t)
-        widget_key = f"wpt_name_{t['index']}"
-        tc["name"] = st.session_state.get(widget_key, t.get("name", "ターンポイント"))
-        turns_for_build.append(tc)
-
-    _out_elevs = (
-        st.session_state.get("_trkpt_fix_elevs") if _choice == "fix"
-        else st.session_state.get("_trkpt_org_elevs")
-    )
-    xml_output = build_enhanced_gpx(
-        raw_content,
-        turns_for_build,
-        matched_points=st.session_state.get("_matched_points") or list(active_points),
-        elevations=_out_elevs,
-    )
-    base_name = st.session_state.get("_gpx_filename", "new_route").replace(".gpx", "") or "new_route"
-    st.download_button(
-        label=f"⬇️ {base_name}_turns.gpx をダウンロード",
-        data=xml_output,
-        file_name=f"{base_name}_turns.gpx",
-        mime="application/gpx+xml",
-    )
-    st.success(f"✅ {len(turns_for_build)} 個のターンポイントを埋め込みました")
+if st.session_state.get("_save_dialog"):
+    _save_gpx_dialog(active_points, raw_content, current_turns, _org_ok, _fix_ok, _choice)
