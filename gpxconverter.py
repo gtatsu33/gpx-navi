@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.0.2"
+APP_VERSION = "3.0.3"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -686,11 +686,15 @@ def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
         try:
             # bytes渡しにすることでencoding宣言付きXMLのParseErrorを回避
             _root = ET.fromstring(xml_str.encode("utf-8"))
-            _trkpts = _root.findall(f".//{{{_GPX_NS}}}trkpt") or _root.findall(".//trkpt")
+            _trkpts = _root.findall(f".//{{{_GPX_NS}}}trkpt")
+            if not _trkpts:
+                _trkpts = _root.findall(".//trkpt")
             for _i, _tp in enumerate(_trkpts):
                 if _i not in acpt_set:
                     continue
-                _ext = _tp.find(f"{{{_GPX_NS}}}extensions") or _tp.find("extensions")
+                _ext = _tp.find(f"{{{_GPX_NS}}}extensions")
+                if _ext is None:
+                    _ext = _tp.find("extensions")
                 if _ext is None:
                     _ext = ET.SubElement(_tp, "extensions")
                 ET.SubElement(_ext, f"{{{_GPXNAVI_NS}}}acpt").text = "1"
@@ -852,14 +856,18 @@ if raw_content:
 
     # gpxnavi:acpt extensionを読み取る
     try:
-        _et_root  = ET.fromstring(raw_content.encode("utf-8"))
-        _et_trkpts = (_et_root.findall(f".//{{{_GPX_NS}}}trkpt") or
-                      _et_root.findall(".//trkpt"))
+        _et_root   = ET.fromstring(raw_content.encode("utf-8"))
+        _et_trkpts = _et_root.findall(f".//{{{_GPX_NS}}}trkpt")
+        if not _et_trkpts:
+            _et_trkpts = _et_root.findall(".//trkpt")
         for _i, _tp in enumerate(_et_trkpts):
-            _ext = _tp.find(f"{{{_GPX_NS}}}extensions") or _tp.find("extensions")
+            _ext = _tp.find(f"{{{_GPX_NS}}}extensions")
+            if _ext is None:
+                _ext = _tp.find("extensions")
             if _ext is not None:
-                _acpt_el = (_ext.find(f"{{{_GPXNAVI_NS}}}acpt") or
-                            _ext.find("acpt"))
+                _acpt_el = _ext.find(f"{{{_GPXNAVI_NS}}}acpt")
+                if _acpt_el is None:
+                    _acpt_el = _ext.find("acpt")
                 if _acpt_el is not None and _acpt_el.text == "1":
                     _acpt_indices.add(_i)
     except Exception:
