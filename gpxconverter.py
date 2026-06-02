@@ -756,7 +756,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
             key="_data_type_radio",
             help="実走行データはマップマッチング・間引きを自動実行します",
         )
-        _uploaded_start = st.file_uploader("GPXファイルをアップロード", type=["gpx"],
+        _uploaded_start = st.file_uploader("GPXファイルをアップロード", type=["gpx", "xml"],
                                             label_visibility="collapsed")
 
     with _col_new:
