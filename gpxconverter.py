@@ -1055,7 +1055,7 @@ if st.session_state.get("_new_route_mode") and "route_points" not in st.session_
 route_points = st.session_state.get("route_points", [])
 
 if _has_wpts:
-    st.info("📂 GPX内のターンポイントを読み込みました。マップマッチング・標高補正はスキップされています。")
+    st.info("📂 ターンポイントを含んだGPXファイルをを読み込みました。マップマッチング・標高補正はスキップされています。")
 
 # ─── ルート情報 ───────────────────────────────
 coords = [(p["lat"], p["lon"]) for p in route_points]
