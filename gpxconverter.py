@@ -684,7 +684,8 @@ def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
     acpt_set = {i for i, p in enumerate(route_points) if p["is_acpt"]}
     if acpt_set:
         try:
-            _root = ET.fromstring(xml_str)
+            # bytes渡しにすることでencoding宣言付きXMLのParseErrorを回避
+            _root = ET.fromstring(xml_str.encode("utf-8"))
             _trkpts = _root.findall(f".//{{{_GPX_NS}}}trkpt") or _root.findall(".//trkpt")
             for _i, _tp in enumerate(_trkpts):
                 if _i not in acpt_set:
@@ -851,7 +852,7 @@ if raw_content:
 
     # gpxnavi:acpt extensionを読み取る
     try:
-        _et_root  = ET.fromstring(raw_content)
+        _et_root  = ET.fromstring(raw_content.encode("utf-8"))
         _et_trkpts = (_et_root.findall(f".//{{{_GPX_NS}}}trkpt") or
                       _et_root.findall(".//trkpt"))
         for _i, _tp in enumerate(_et_trkpts):
