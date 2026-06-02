@@ -21,7 +21,7 @@ import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
 st.markdown(f'# 🚴 gpx-navi エディター <span style="font-size:0.35em; color:#9ca3af; font-weight:normal; vertical-align:middle;">v{APP_VERSION}</span>', unsafe_allow_html=True)
@@ -756,7 +756,7 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
             key="_data_type_radio",
             help="実走行データはマップマッチング・間引きを自動実行します",
         )
-        _uploaded_start = st.file_uploader("GPXファイルをアップロード", type=["gpx", "xml"],
+        _uploaded_start = st.file_uploader("GPXファイルをアップロード",
                                             label_visibility="collapsed")
 
     with _col_new:
@@ -778,6 +778,9 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
             st.rerun()
 
     if _uploaded_start is not None:
+        if not _uploaded_start.name.lower().endswith((".gpx", ".xml")):
+            st.error("GPXファイル（.gpx または .xml）を選択してください。")
+            st.stop()
         _is_actual_ride_s = "実走行データ" in st.session_state.get("_data_type_radio", "")
         _fk = f"{_uploaded_start.name}_{_is_actual_ride_s}"
         if st.session_state.get("_file_key") != _fk:
