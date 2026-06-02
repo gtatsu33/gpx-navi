@@ -20,8 +20,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit.components.v1 as components
 from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
+import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
+
+_GPX_NS      = "http://www.topografix.com/GPX/1/1"
+_GPXNAVI_NS  = "https://gpxnavi"
+ET.register_namespace("",        _GPX_NS)
+ET.register_namespace("xsi",     "http://www.w3.org/2001/XMLSchema-instance")
+ET.register_namespace("gpxnavi", _GPXNAVI_NS)
 
 st.set_page_config(page_title="gpx-navi エディター", layout="wide", page_icon="🚴")
 st.markdown(f'# 🚴 gpx-navi エディター <span style="font-size:0.35em; color:#9ca3af; font-weight:normal; vertical-align:middle;">v{APP_VERSION}</span>', unsafe_allow_html=True)
@@ -670,7 +677,27 @@ def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
         enhanced.waypoints.append(gpxpy.gpx.GPXWaypoint(
             latitude=p["lat"], longitude=p["lon"], name=name, description=desc,
         ))
-    return enhanced.to_xml()
+
+    xml_str = enhanced.to_xml()
+
+    # acpt extensionを追加
+    acpt_set = {i for i, p in enumerate(route_points) if p["is_acpt"]}
+    if acpt_set:
+        try:
+            _root = ET.fromstring(xml_str)
+            _trkpts = _root.findall(f".//{{{_GPX_NS}}}trkpt") or _root.findall(".//trkpt")
+            for _i, _tp in enumerate(_trkpts):
+                if _i not in acpt_set:
+                    continue
+                _ext = _tp.find(f"{{{_GPX_NS}}}extensions") or _tp.find("extensions")
+                if _ext is None:
+                    _ext = ET.SubElement(_tp, "extensions")
+                ET.SubElement(_ext, f"{{{_GPXNAVI_NS}}}acpt").text = "1"
+            xml_str = ET.tostring(_root, encoding="unicode")
+        except Exception:
+            pass  # 失敗時はextensionなしで返す
+
+    return xml_str
 
 # ─────────────────────────────────────────────
 # 標高デフォルト選択
@@ -802,6 +829,7 @@ raw_content = st.session_state.get("_raw_gpx")
 points = []
 gpx_parsed = None
 _has_wpts = False
+_acpt_indices = set()
 
 if raw_content:
     try:
@@ -820,6 +848,21 @@ if raw_content:
         st.stop()
 
     _has_wpts = len(gpx_parsed.waypoints) > 0
+
+    # gpxnavi:acpt extensionを読み取る
+    try:
+        _et_root  = ET.fromstring(raw_content)
+        _et_trkpts = (_et_root.findall(f".//{{{_GPX_NS}}}trkpt") or
+                      _et_root.findall(".//trkpt"))
+        for _i, _tp in enumerate(_et_trkpts):
+            _ext = _tp.find(f"{{{_GPX_NS}}}extensions") or _tp.find("extensions")
+            if _ext is not None:
+                _acpt_el = (_ext.find(f"{{{_GPXNAVI_NS}}}acpt") or
+                            _ext.find("acpt"))
+                if _acpt_el is not None and _acpt_el.text == "1":
+                    _acpt_indices.add(_i)
+    except Exception:
+        pass
 
 _skip_map_center_save = st.session_state.pop("_skip_map_center_save", False)
 
@@ -934,8 +977,13 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
     _base_coords = list(st.session_state.get("_matched_points") or points or [])
     rp = [make_route_point(lat, lon, changed=not _has_wpts) for lat, lon in _base_coords]
     if rp:
-        rp[0]["is_acpt"] = True
-        rp[-1]["is_acpt"] = True
+        # GPXにacpt extensionがあればそれを復元、なければ最初・最後のみ
+        if _acpt_indices and len(_acpt_indices) >= 2 and max(_acpt_indices) < len(rp):
+            for _ai in _acpt_indices:
+                rp[_ai]["is_acpt"] = True
+        else:
+            rp[0]["is_acpt"] = True
+            rp[-1]["is_acpt"] = True
         # org 標高処理
         if gpx_parsed is not None:
             _all_orig_elevs = [p.elevation for tr in gpx_parsed.tracks
