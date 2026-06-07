@@ -24,7 +24,7 @@ function _post(obj) { obj.isStreamlitMessage = true; window.parent.postMessage(o
 function _setH(h)   { _post({type:'streamlit:setFrameHeight', height:h}); }
 function _setV(v)   { _post({type:'streamlit:setComponentValue', value:v, dataType:'json'}); }
 
-var map=null, _layers=[], _curTrkpts=[], _curCumDist=[], _curWpts=[], _trkptToWptIdx={};
+var map=null, _layers=[], _curTrkpts=[], _curCumDist=[], _curWpts=[], _trkptToWptIdx={}, _cursorMarker=null;
 
 function _hav(a,b,c,d){
   var R=6371000,dA=(c-a)*Math.PI/180,dB=(d-b)*Math.PI/180;
@@ -215,12 +215,52 @@ function renderMap(data,height){
     add(m);
   });
   _setH(height||520);
+  window.parent.postMessage({type:'gpxnavi_leaflet_ready'},'*');
 }
 
+function _trkptAtKm(km){
+  if(!_curCumDist.length)return -1;
+  var targetM=km*1000,best=0,bestDiff=Infinity;
+  for(var i=0;i<_curCumDist.length;i++){
+    var diff=Math.abs(_curCumDist[i]-targetM);
+    if(diff<bestDiff){bestDiff=diff;best=i;}
+  }
+  return best;
+}
+function _brng(la1,lo1,la2,lo2){
+  var dL=(lo2-lo1)*Math.PI/180,r1=la1*Math.PI/180,r2=la2*Math.PI/180;
+  var y=Math.sin(dL)*Math.cos(r2);
+  var x=Math.cos(r1)*Math.sin(r2)-Math.sin(r1)*Math.cos(r2)*Math.cos(dL);
+  return(Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+function _arrowIcon(deg){
+  var s='<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+    +'<polygon points="12,2 22,20 12,14 2,20" fill="#e67e22" stroke="white" stroke-width="1.5"'
+    +' transform="rotate('+deg+',12,12)"/></svg>';
+  return L.divIcon({html:s,iconSize:[24,24],iconAnchor:[12,12],className:''});
+}
+function _updateCursorMarker(km){
+  if(_cursorMarker){map.removeLayer(_cursorMarker);_cursorMarker=null;}
+  if(km===null||km===undefined||!_curTrkpts.length||!map)return;
+  var idx=_trkptAtKm(km);
+  if(idx<0)return;
+  var n=_curTrkpts.length;
+  var a=idx>0?idx-1:idx, b=idx<n-1?idx+1:idx;
+  var deg=_brng(_curTrkpts[a][0],_curTrkpts[a][1],_curTrkpts[b][0],_curTrkpts[b][1]);
+  _cursorMarker=L.marker([_curTrkpts[idx][0],_curTrkpts[idx][1]],
+    {icon:_arrowIcon(deg),zIndexOffset:1000,interactive:false}
+  ).addTo(map);
+}
 window.addEventListener('message',function(e){
   if(e.data&&e.data.type==='streamlit:render'){
     var a=e.data.args;
     renderMap(a.data,a.height||520);
+  }else if(e.data&&e.data.type==='elev_cursor'){
+    console.log('[leaflet] got elev_cursor km=',e.data.km);
+    _updateCursorMarker(e.data.km);
+  }else if(e.data&&e.data.type==='gpxnavi_bridge_ready'){
+    console.log('[leaflet] got bridge_ready, sending leaflet_ready');
+    window.parent.postMessage({type:'gpxnavi_leaflet_ready'},'*');
   }
 });
 

@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3.0"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -1165,6 +1165,44 @@ with col_map:
     _elev_fig = _render_elevation_profile(route_points)
     if _elev_fig is not None:
         st.plotly_chart(_elev_fig, width="stretch", config={"displayModeBar": False})
+        components.html("""<script>
+(function(){
+  var leafletWin=null;
+  console.log('[bridge] script start');
+  window.parent.addEventListener('message',function(e){
+    if(e.data&&e.data.type==='gpxnavi_leaflet_ready'){
+      console.log('[bridge] got leaflet_ready, source=',e.source);
+      leafletWin=e.source;
+    }
+  });
+  function hook(){
+    var plots=window.parent.document.querySelectorAll('.js-plotly-plot');
+    console.log('[bridge] hook: plotly divs found=',plots.length, 'p.on=',plots.length?typeof plots[plots.length-1].on:'n/a');
+    if(!plots.length||typeof plots[plots.length-1].on!=='function'){setTimeout(hook,300);return;}
+    var p=plots[plots.length-1];
+    try{if(p._elevHoverFn)p.removeListener('plotly_hover',p._elevHoverFn);}catch(e){}
+    try{if(p._elevUnhoverFn)p.removeListener('plotly_unhover',p._elevUnhoverFn);}catch(e){}
+    p._elevHoverFn=function(d){
+      console.log('[bridge] plotly_hover km=',d.points[0].x,'leafletWin=',!!leafletWin);
+      if(leafletWin&&d.points&&d.points.length)
+        leafletWin.postMessage({type:'elev_cursor',km:d.points[0].x},'*');
+    };
+    p._elevUnhoverFn=function(){
+      if(leafletWin) leafletWin.postMessage({type:'elev_cursor',km:null},'*');
+    };
+    p.on('plotly_hover',p._elevHoverFn);
+    p.on('plotly_unhover',p._elevUnhoverFn);
+  }
+  hook();
+  var _t=setInterval(function(){
+    if(leafletWin){clearInterval(_t);return;}
+    console.log('[bridge] retry bridge_ready');
+    window.parent.postMessage({type:'gpxnavi_bridge_ready'},'*');
+  },200);
+  console.log('[bridge] sending bridge_ready');
+  window.parent.postMessage({type:'gpxnavi_bridge_ready'},'*');
+})();
+</script>""", height=1)
 
 # ── イベント処理 ─────────────────────────────────
 if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.get("_map_event_ts", 0):
