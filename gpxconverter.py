@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.5.2"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -290,7 +290,7 @@ _OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-def fetch_intersection_names(turns, radius=20):
+def fetch_intersection_names(turns, radius=20, http_timeout=30, max_attempts=None):
     """
     Overpass API でターンポイント付近のOSMノードから交差点名を取得する。
     nameタグを持つノードを半径radius(m)以内で検索し、最近傍のものを採用する。
@@ -300,17 +300,19 @@ def fetch_intersection_names(turns, radius=20):
         return {}
 
     n = len(turns)
+    urls = _OVERPASS_URLS if max_attempts is None else _OVERPASS_URLS[:max_attempts]
 
     _HW = '"^(traffic_signals|crossing|give_way|stop|mini_roundabout|motorway_junction)$"'
     union_parts = "".join(
         f'node(around:{radius},{t["lat"]},{t["lon"]})[name][highway~{_HW}];'
         for t in turns
     )
-    query = f"[out:json][timeout:25];({union_parts});out body;"
+    overpass_timeout = max(1, http_timeout - 2)
+    query = f"[out:json][timeout:{overpass_timeout}];({union_parts});out body;"
 
     elements = None
     with st.spinner(f"交差点名を取得中…（{n} 件）"):
-        for url in _OVERPASS_URLS:
+        for url in urls:
             try:
                 resp = requests.post(
                     url,
@@ -320,7 +322,7 @@ def fetch_intersection_names(turns, radius=20):
                         "Accept": "application/json",
                         "User-Agent": "GPXTurnDetector/1.0",
                     },
-                    timeout=30,
+                    timeout=http_timeout,
                 )
                 resp.raise_for_status()
                 elements = resp.json().get("elements", [])
@@ -345,15 +347,17 @@ def fetch_intersection_names(turns, radius=20):
 
     return result
 
-def fetch_spot_name(lat, lon, radius=20):
+def fetch_spot_name(lat, lon, radius=20, http_timeout=15, max_attempts=None):
     """クリック位置付近のPOI名を取得する（交差点名が見つからなかった場合のフォールバック）。"""
     tags = ["tourism", "amenity", "leisure", "historic", "natural", "shop"]
     union_parts = "".join(
         f'node(around:{radius},{lat},{lon})[name]["{tag}"];'
         for tag in tags
     )
-    query = f"[out:json][timeout:10];({union_parts});out body;"
-    for url in _OVERPASS_URLS:
+    overpass_timeout = max(1, http_timeout - 2)
+    query = f"[out:json][timeout:{overpass_timeout}];({union_parts});out body;"
+    urls = _OVERPASS_URLS if max_attempts is None else _OVERPASS_URLS[:max_attempts]
+    for url in urls:
         try:
             resp = requests.post(
                 url,
@@ -363,7 +367,7 @@ def fetch_spot_name(lat, lon, radius=20):
                     "Accept": "application/json",
                     "User-Agent": "GPXTurnDetector/1.0",
                 },
-                timeout=15,
+                timeout=http_timeout,
             )
             resp.raise_for_status()
             elements = resp.json().get("elements", [])
@@ -1172,6 +1176,7 @@ with col_map:
     if(e.data&&e.data.type==='gpxnavi_leaflet_ready'){
       leafletWin=e.source;
       leafletWin.postMessage({type:'gpxnavi_bridge_ack'},'*');
+      hook();
     }
   });
   function hook(){
@@ -1180,6 +1185,7 @@ with col_map:
     var p=plots[plots.length-1];
     try{if(p._elevHoverFn)p.removeListener('plotly_hover',p._elevHoverFn);}catch(e){}
     try{if(p._elevUnhoverFn)p.removeListener('plotly_unhover',p._elevUnhoverFn);}catch(e){}
+    try{if(p._elevClickFn)p.removeListener('plotly_click',p._elevClickFn);}catch(e){}
     p._elevHoverFn=function(d){
       if(leafletWin&&d.points&&d.points.length)
         leafletWin.postMessage({type:'elev_cursor',km:d.points[0].x},'*');
@@ -1187,8 +1193,13 @@ with col_map:
     p._elevUnhoverFn=function(){
       if(leafletWin) leafletWin.postMessage({type:'elev_cursor',km:null},'*');
     };
+    p._elevClickFn=function(d){
+      if(leafletWin&&d.points&&d.points.length)
+        leafletWin.postMessage({type:'elev_click',km:d.points[0].x},'*');
+    };
     p.on('plotly_hover',p._elevHoverFn);
     p.on('plotly_unhover',p._elevUnhoverFn);
+    p.on('plotly_click',p._elevClickFn);
   }
   hook();
 })();
@@ -1387,14 +1398,14 @@ if isinstance(_map_event, dict) and _map_event.get("ts", 0) != st.session_state.
                 _delta = None
             _tmp = {"lat": rp[_near_idx]["lat"], "lon": rp[_near_idx]["lon"],
                     "index": _near_idx, "delta": _delta}
-            _inames = fetch_intersection_names([_tmp], radius=20)
+            _inames = fetch_intersection_names([_tmp], radius=20, http_timeout=5, max_attempts=1)
             _iname  = _inames.get(_near_idx)
             if _delta is not None:
                 _wpt_info = with_name({"name": "", "delta": _delta}, _iname)
             elif _iname:
                 _wpt_info = {"name": _iname, "delta": None}
             else:
-                _spot = fetch_spot_name(rp[_near_idx]["lat"], rp[_near_idx]["lon"], radius=20)
+                _spot = fetch_spot_name(rp[_near_idx]["lat"], rp[_near_idx]["lon"], radius=20, http_timeout=5, max_attempts=1)
                 _wpt_info = {"name": f"「{_spot}」" if _spot else "追加したターンポイント", "delta": None}
             rp[_near_idx]["wpt"] = _wpt_info
             st.session_state["route_points"] = rp

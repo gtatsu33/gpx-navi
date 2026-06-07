@@ -243,6 +243,24 @@ function _arrowIcon(deg){
     +' transform="rotate('+deg+',12,12)"/></svg>';
   return L.divIcon({html:s,iconSize:[24,24],iconAnchor:[12,12],className:''});
 }
+function _handleElevClick(km){
+  if(!_curTrkpts.length||!map)return;
+  var idx=_trkptAtKm(km);
+  if(idx<0)return;
+  var wi=_trkptToWptIdx[idx];
+  if(wi!==undefined){
+    _send({type:'wpt_click',wpt_idx:wi});
+    return;
+  }
+  var lat=_curTrkpts[idx][0],lng=_curTrkpts[idx][1];
+  var content='<div style="min-width:168px">'
+    +'<button class="dlg-btn" onclick="window._dlg(\'acpt\','+lat+','+lng+','+idx+')">⚓ アンカーポイントを挿入する</button>'
+    +'<button class="dlg-btn" onclick="window._dlg(\'wpt\','+lat+','+lng+','+idx+')">🔀 ターンポイントを追加する</button>'
+    +'<button class="dlg-btn" onclick="window._dlg(\'cancel\','+lat+','+lng+','+idx+')">✖ キャンセル</button>'
+    +'</div>';
+  L.popup({closeButton:true,closeOnClick:false,minWidth:180})
+    .setLatLng([lat,lng]).setContent(content).openOn(map);
+}
 function _updateCursorMarker(km){
   if(_cursorMarker){map.removeLayer(_cursorMarker);_cursorMarker=null;}
   if(km===null||km===undefined||!_curTrkpts.length||!map)return;
@@ -261,6 +279,8 @@ window.addEventListener('message',function(e){
     renderMap(a.data,a.height||520);
   }else if(e.data&&e.data.type==='elev_cursor'){
     _updateCursorMarker(e.data.km);
+  }else if(e.data&&e.data.type==='elev_click'){
+    _handleElevClick(e.data.km);
   }else if(e.data&&e.data.type==='gpxnavi_bridge_ack'){
     clearInterval(window._leafletReadyTimer);
   }
