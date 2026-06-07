@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.0.3"
+APP_VERSION = "3.0.4"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -1027,6 +1027,10 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
                 idx = nearest_trkpt_index(wpt.latitude, wpt.longitude, _base_coords)
                 rp[idx]["wpt"] = {"name": wpt.name or "ターンポイント", "delta": delta}
             st.session_state["_iname_status"] = "スキップ"
+            if rp[0]["wpt"] is None:
+                rp[0]["wpt"] = {"name": "スタート", "delta": None}
+            if rp[-1]["wpt"] is None:
+                rp[-1]["wpt"] = {"name": "目的地", "delta": None}
         else:
             _raw_turns = detect_turns(_base_coords, min_turn_angle=45, min_dist=100, smooth=1)
             _inames = fetch_intersection_names(_raw_turns)
