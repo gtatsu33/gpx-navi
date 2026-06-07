@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.2.0"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"

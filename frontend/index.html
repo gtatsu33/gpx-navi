@@ -24,7 +24,7 @@ function _post(obj) { obj.isStreamlitMessage = true; window.parent.postMessage(o
 function _setH(h)   { _post({type:'streamlit:setFrameHeight', height:h}); }
 function _setV(v)   { _post({type:'streamlit:setComponentValue', value:v, dataType:'json'}); }
 
-var map=null, _layers=[], _curTrkpts=[];
+var map=null, _layers=[], _curTrkpts=[], _curCumDist=[], _curWpts=[], _trkptToWptIdx={};
 
 function _hav(a,b,c,d){
   var R=6371000,dA=(c-a)*Math.PI/180,dB=(d-b)*Math.PI/180;
@@ -37,6 +37,32 @@ function _near(pts,lat,lng){
   var mi=Infinity,mx=0;
   for(var i=0;i<pts.length;i++){var d=_hav(lat,lng,pts[i][0],pts[i][1]);if(d<mi){mi=d;mx=i;}}
   return{idx:mx,dist:mi};
+}
+function _nearAll(pts,lat,lng,thrM){
+  var result=[];
+  for(var i=0;i<pts.length;i++){
+    var d=_hav(lat,lng,pts[i][0],pts[i][1]);
+    if(d<=thrM)result.push({idx:i,dist:d});
+  }
+  return result;
+}
+function _cumDist(trkpts){
+  var d=[0];
+  for(var i=1;i<trkpts.length;i++)
+    d.push(d[i-1]+_hav(trkpts[i-1][0],trkpts[i-1][1],trkpts[i][0],trkpts[i][1]));
+  return d;
+}
+// 閾値内の候補trkptをルート距離200m以内でクラスタリングし、各クラスタの代表（最近傍）を返す
+function _clusterCandidates(cands){
+  if(!cands.length)return[];
+  var clusters=[],cur=[cands[0]];
+  for(var i=1;i<cands.length;i++){
+    var gap=Math.abs(_curCumDist[cands[i].idx]-_curCumDist[cands[i-1].idx]);
+    if(gap<200){cur.push(cands[i]);}
+    else{clusters.push(cur);cur=[cands[i]];}
+  }
+  clusters.push(cur);
+  return clusters.map(function(c){return c.reduce(function(a,b){return a.dist<b.dist?a:b;});});
 }
 function _send(evt){
   var c=map.getCenter();evt.center={lat:c.lat,lng:c.lng};evt.zoom=map.getZoom();evt.ts=Date.now();
@@ -64,10 +90,44 @@ window._dlg = function(action,lat,lng,nidx){
   }
 };
 
+window._dlgCandidate = function(action,trkptIdx,wptIdx,lat,lng){
+  map.closePopup();
+  if(action==='edit'){
+    _send({type:'wpt_click',wpt_idx:wptIdx});
+  }else if(action==='add'){
+    _send({type:'dialog_result',action:'wpt',lat:lat,lng:lng,nearest_trkpt_idx:trkptIdx});
+  }
+};
+
+function _showCandidatePopup(reps,lat,lng){
+  var html='<div style="min-width:210px">'
+    +'<div style="font-size:11px;color:#666;padding:2px 4px 6px">📍 この付近に複数の地点があります</div>';
+  reps.forEach(function(r){
+    var km=(_curCumDist[r.idx]/1000).toFixed(1);
+    var wi=_trkptToWptIdx[r.idx];
+    if(wi!==undefined){
+      var name=_curWpts[wi].name;
+      html+='<button class="dlg-btn" onclick="window._dlgCandidate(\'edit\','+r.idx+','+wi+','+lat+','+lng+')">'
+           +'✏ 「'+name+'」を編集 ('+km+'km)</button>';
+    }else{
+      html+='<button class="dlg-btn" onclick="window._dlgCandidate(\'add\','+r.idx+',-1,'+lat+','+lng+')">'
+           +'＋ 新wptを追加 ('+km+'km)</button>';
+    }
+  });
+  html+='<button class="dlg-btn" onclick="map.closePopup()">✖ キャンセル</button></div>';
+  L.popup({closeButton:true,closeOnClick:false,minWidth:220})
+    .setLatLng([lat,lng]).setContent(html).openOn(map);
+}
+
 function renderMap(data,height){
   var el=document.getElementById('load');if(el)el.remove();
   var trkpts=data.trkpts||[],acpts=data.acpts||[],wpts=data.wpts||[];
   _curTrkpts=trkpts;
+  _curCumDist=_cumDist(trkpts);
+  _curWpts=wpts;
+  _trkptToWptIdx={};
+  wpts.forEach(function(w,i){_trkptToWptIdx[w.trkpt_idx]=i;});
+
   var pyC=data.center,pyZ=data.zoom,force=data.force_center,thr=data.click_threshold_px||20;
   var sc=null;try{sc=JSON.parse(localStorage.getItem('gpxnavi_map_center')||'null');}catch(e){}
   var sz=parseInt(localStorage.getItem('gpxnavi_map_zoom')||'0')||null;
@@ -88,11 +148,18 @@ function renderMap(data,height){
   }
   map.off('click');
   map.on('click',function(e){
-    var lat=e.latlng.lat,lng=e.latlng.lng,n=_near(_curTrkpts,lat,lng);
-    if(n===null||n.dist>_pxM(thr,map.getZoom(),lat)){
+    var lat=e.latlng.lat,lng=e.latlng.lng;
+    var thrM=_pxM(thr,map.getZoom(),lat);
+    var cands=_nearAll(_curTrkpts,lat,lng,thrM);
+    if(!cands.length){
       _send({type:'click_empty',lat:lat,lng:lng});
+      return;
+    }
+    var reps=_clusterCandidates(cands);
+    if(reps.length>1){
+      _showCandidatePopup(reps,lat,lng);
     }else{
-      var ni=n.idx;
+      var ni=reps[0].idx;
       var content='<div style="min-width:168px">'
         +'<button class="dlg-btn" onclick="window._dlg(\'extend\','+lat+','+lng+','+ni+')">📍 ゴールを延長する</button>'
         +'<button class="dlg-btn" onclick="window._dlg(\'acpt\','+lat+','+lng+','+ni+')">⚓ アンカーポイントを挿入する</button>'
@@ -117,9 +184,19 @@ function renderMap(data,height){
       m=L.circleMarker([w.lat,w.lng],{radius:9,color:w.color,fillColor:w.color,fillOpacity:0.9,weight:2})
         .bindTooltip('wpt:'+(i+1)+' '+w.name);
     }
-    (function(idx){
-      m.on('click',function(e){L.DomEvent.stopPropagation(e);_send({type:'wpt_click',wpt_idx:idx});});
-    })(i);
+    (function(wptArrIdx,wdata){
+      m.on('click',function(e){
+        L.DomEvent.stopPropagation(e);
+        var thrM=_pxM(thr,map.getZoom(),wdata.lat);
+        var cands=_nearAll(_curTrkpts,wdata.lat,wdata.lng,thrM);
+        var reps=_clusterCandidates(cands);
+        if(reps.length>1){
+          _showCandidatePopup(reps,wdata.lat,wdata.lng);
+        }else{
+          _send({type:'wpt_click',wpt_idx:wptArrIdx});
+        }
+      });
+    })(i,w);
     add(m);
   });
   acpts.forEach(function(a,i){
