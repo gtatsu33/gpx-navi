@@ -215,6 +215,10 @@ function renderMap(data,height){
     add(m);
   });
   _setH(height||520);
+  clearInterval(window._leafletReadyTimer);
+  window._leafletReadyTimer=setInterval(function(){
+    window.parent.postMessage({type:'gpxnavi_leaflet_ready'},'*');
+  },1000);
   window.parent.postMessage({type:'gpxnavi_leaflet_ready'},'*');
 }
 
@@ -256,11 +260,9 @@ window.addEventListener('message',function(e){
     var a=e.data.args;
     renderMap(a.data,a.height||520);
   }else if(e.data&&e.data.type==='elev_cursor'){
-    console.log('[leaflet] got elev_cursor km=',e.data.km);
     _updateCursorMarker(e.data.km);
-  }else if(e.data&&e.data.type==='gpxnavi_bridge_ready'){
-    console.log('[leaflet] got bridge_ready, sending leaflet_ready');
-    window.parent.postMessage({type:'gpxnavi_leaflet_ready'},'*');
+  }else if(e.data&&e.data.type==='gpxnavi_bridge_ack'){
+    clearInterval(window._leafletReadyTimer);
   }
 });
 

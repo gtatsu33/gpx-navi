@@ -1168,22 +1168,19 @@ with col_map:
         components.html("""<script>
 (function(){
   var leafletWin=null;
-  console.log('[bridge] script start');
   window.parent.addEventListener('message',function(e){
     if(e.data&&e.data.type==='gpxnavi_leaflet_ready'){
-      console.log('[bridge] got leaflet_ready, source=',e.source);
       leafletWin=e.source;
+      leafletWin.postMessage({type:'gpxnavi_bridge_ack'},'*');
     }
   });
   function hook(){
     var plots=window.parent.document.querySelectorAll('.js-plotly-plot');
-    console.log('[bridge] hook: plotly divs found=',plots.length, 'p.on=',plots.length?typeof plots[plots.length-1].on:'n/a');
     if(!plots.length||typeof plots[plots.length-1].on!=='function'){setTimeout(hook,300);return;}
     var p=plots[plots.length-1];
     try{if(p._elevHoverFn)p.removeListener('plotly_hover',p._elevHoverFn);}catch(e){}
     try{if(p._elevUnhoverFn)p.removeListener('plotly_unhover',p._elevUnhoverFn);}catch(e){}
     p._elevHoverFn=function(d){
-      console.log('[bridge] plotly_hover km=',d.points[0].x,'leafletWin=',!!leafletWin);
       if(leafletWin&&d.points&&d.points.length)
         leafletWin.postMessage({type:'elev_cursor',km:d.points[0].x},'*');
     };
@@ -1194,13 +1191,6 @@ with col_map:
     p.on('plotly_unhover',p._elevUnhoverFn);
   }
   hook();
-  var _t=setInterval(function(){
-    if(leafletWin){clearInterval(_t);return;}
-    console.log('[bridge] retry bridge_ready');
-    window.parent.postMessage({type:'gpxnavi_bridge_ready'},'*');
-  },200);
-  console.log('[bridge] sending bridge_ready');
-  window.parent.postMessage({type:'gpxnavi_bridge_ready'},'*');
 })();
 </script>""", height=1)
 
