@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.0.4"
+APP_VERSION = "3.1.0"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -249,6 +249,13 @@ def turn_label(delta):
 def nearest_trkpt_index(lat, lon, points):
     """クリック位置に最も近いトラックポイントのインデックスを返す"""
     return min(range(len(points)),
+               key=lambda i: haversine(lat, lon, points[i][0], points[i][1]))
+
+def nearest_trkpt_index_from(lat, lon, points, start=0):
+    """start以降のtrkptの中で最近傍のインデックスを返す"""
+    if start >= len(points):
+        start = 0
+    return min(range(start, len(points)),
                key=lambda i: haversine(lat, lon, points[i][0], points[i][1]))
 
 def with_name(wpt_info, intersection_name=None):
@@ -1016,6 +1023,7 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
             st.session_state["_grade_org"] = None
         # wpt 初期化
         if _has_wpts and gpx_parsed:
+            search_from = 0
             for wpt in gpx_parsed.waypoints:
                 delta = None
                 desc  = wpt.description or ""
@@ -1024,8 +1032,9 @@ if st.session_state.get("_proc_status") is None and st.session_state.get("_mm_st
                         delta = float(desc.split(":")[1])
                     except ValueError:
                         pass
-                idx = nearest_trkpt_index(wpt.latitude, wpt.longitude, _base_coords)
+                idx = nearest_trkpt_index_from(wpt.latitude, wpt.longitude, _base_coords, search_from)
                 rp[idx]["wpt"] = {"name": wpt.name or "ターンポイント", "delta": delta}
+                search_from = idx
             st.session_state["_iname_status"] = "スキップ"
             if rp[0]["wpt"] is None:
                 rp[0]["wpt"] = {"name": "スタート", "delta": None}
