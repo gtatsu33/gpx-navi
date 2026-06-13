@@ -403,7 +403,7 @@ async function deleteRoute(id) {
 const escHtml = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stripBrackets = name => (name.startsWith('「') && name.endsWith('」')) ? name.slice(1, -1) : name;
 const displayName   = name => stripBrackets(name).replace(/（[^）]*）/g, '');
-const spokenName    = name => { const n = stripBrackets(name); const m = n.match(/（([^）]+)）/); return m ? m[1] : n; };
+const spokenName    = name => stripBrackets(name).replace(/\s*[^\s（）]+（([^）]+)）/g, '$1');
 
 // ── Turn Styles ───────────────────────────────────────
 function bcToTurnName(bc) {

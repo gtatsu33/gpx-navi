@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.5.2"
+APP_VERSION = "3.5.3"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -173,11 +173,11 @@ def _render_elevation_profile(route_points):
 
     fig.update_layout(
         height=150,
-        margin=dict(l=50, r=10, t=5, b=35),
+        margin=dict(l=50, r=10, t=5, b=55),
         showlegend=True,
         legend=dict(
-            orientation="h", yanchor="top", y=0.99,
-            xanchor="right", x=0.99,
+            orientation="h", yanchor="top", y=-0.35,
+            xanchor="right", x=1.0,
             font=dict(size=9),
             bgcolor="rgba(255,255,255,0.7)",
         ),
@@ -1549,7 +1549,7 @@ with col_list:
                 height=0,
             )
 
-    st.caption("💡 地図をクリックして新しいポイントを追加。ナビゲーションの内容は、「左折」「やや左」「直進」「やや右」「右折」を推奨しますが、フリーワードです。「左」、「右」の文字を入れておくと逆走時に正しく変換されます")
+    st.caption("💡 地図をクリックして新しいポイントを追加。ナビゲーションの内容は、「左折」「やや左」「直進」「やや右」「右折」を推奨しますが、フリーワードです。「左」、「右」の文字を入れておくと逆走時に正しく変換されます。鍵カッコ「」で全体を括るとスポット名として解釈します。漢字名称の読み方を括弧（）で括ることで指定できます。")
 
 # ─────────────────────────────────────────────
 # ダウンロード
