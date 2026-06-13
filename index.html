@@ -1063,13 +1063,16 @@ function rerouteToNearest() {
   const pos   = posMarker.getLatLng();
   const track = currentRoute.track;
 
-  // ① 現在地に最も近いtrkptのインデックスを求める
-  let nearestTrkIdx = 0, bestD = Infinity;
-  for (let i = 0; i < track.length; i++) {
+  // ① 直前に通過したwptのtrkIdx+1以降で最近傍trkptを求める
+  //    （同じ座標を複数回通るルートで通過済みtrkptを誤選択しないため）
+  const prevTrkIdx = (targetIdx > 0 && waypoints[targetIdx - 1].trkIdx != null)
+      ? waypoints[targetIdx - 1].trkIdx + 1 : 0;
+  let nearestTrkIdx = prevTrkIdx, bestD = Infinity;
+  for (let i = prevTrkIdx; i < track.length; i++) {
     const d = geoDist(pos.lat, pos.lng, track[i].lat, track[i].lon);
     if (d < bestD) { bestD = d; nearestTrkIdx = i; }
   }
-  dbgLog(`[REROUTE] nearest trkpt[${nearestTrkIdx}] d=${Math.round(bestD)}m`);
+  dbgLog(`[REROUTE] prevTrkIdx=${prevTrkIdx} nearest trkpt[${nearestTrkIdx}] d=${Math.round(bestD)}m`);
 
   // ② 各wptのtrkIdxと比較して、nearestTrkIdx以降で最初のwptを選ぶ
   // （ゴールセンチネルはtrkIdxを持たないため除外し、デフォルトはゴール）
