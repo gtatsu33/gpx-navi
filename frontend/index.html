@@ -173,7 +173,26 @@ function renderMap(data,height){
   });
   _layers.forEach(function(l){map.removeLayer(l);});_layers=[];
   function add(l){l.addTo(map);_layers.push(l);}
-  if(trkpts.length>1)add(L.polyline(trkpts,{color:'#3498db',weight:4,opacity:0.8}));
+  if(trkpts.length>1){
+    var poly=L.polyline(trkpts,{color:'#3498db',weight:4,opacity:0.8});
+    poly.on('click',function(e){
+      L.DomEvent.stopPropagation(e);
+      var lat=e.latlng.lat,lng=e.latlng.lng;
+      var nearest=_near(_curTrkpts,lat,lng);
+      if(!nearest)return;
+      var ni=nearest.idx;
+      var content='<div style="min-width:168px">'
+        +'<button class="dlg-btn" onclick="window._dlg(\'extend\','+lat+','+lng+','+ni+')">📍 ゴールを延長する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'acpt\','+lat+','+lng+','+ni+')">⚓ アンカーポイントを挿入する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'wpt\','+lat+','+lng+','+ni+')">🔀 ターンポイントを追加する</button>'
+        +'<button class="dlg-btn" onclick="window._dlg(\'cancel\','+lat+','+lng+','+ni+')">✖ キャンセル</button>'
+        +'</div>';
+      L.popup({closeButton:true,closeOnClick:false,minWidth:180})
+        .setLatLng([_curTrkpts[ni][0],_curTrkpts[ni][1]])
+        .setContent(content).openOn(map);
+    });
+    add(poly);
+  }
   wpts.forEach(function(w,i){
     var m;
     if(i===0){
