@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.5.3"
+APP_VERSION = "3.5.4"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -1475,6 +1475,7 @@ with col_list:
                      help="直前の操作を元に戻す（1回のみ）"):
             _us = st.session_state.pop("_undo_state")
             st.session_state["route_points"] = _us["route_points"]
+            st.session_state["route_modified"] = any(p["changed"] for p in _us["route_points"])
             st.rerun()
     if st.session_state.get("route_modified") and current_wpts:
         st.warning("ルートが変更されています。ターンポイント検出を実行してください。", icon="⚠️")
