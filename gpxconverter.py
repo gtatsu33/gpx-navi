@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.6.2"
+APP_VERSION = "3.6.6"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -1082,7 +1082,9 @@ dists_all = [haversine(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1
              for i in range(len(coords) - 1)]
 avg_spacing   = np.mean(dists_all) if dists_all else 0.0
 total_dist_km = sum(dists_all) / 1000
-route_name    = next((t.name for t in gpx_parsed.tracks if t.name), "（名称なし）") if gpx_parsed else "新規ルート"
+_track_name    = next((t.name for t in gpx_parsed.tracks if t.name), None) if gpx_parsed else None
+_fname_fallback = st.session_state.get("_gpx_filename", "").removesuffix(".gpx").removesuffix("_gne")
+route_name     = _track_name or _fname_fallback or "（名称なし）"
 
 # ── 「編集を破棄して戻る」ボタン ──────────────────
 if st.session_state.get("_confirm_back"):
@@ -1607,16 +1609,17 @@ def _save_gpx_dialog(route_points, elev_choice):
 
     # ── ファイル名入力 ──────────────────────────────
     _default = (st.session_state.get("_gpx_filename", "new_route")
-                .replace(".gpx", "") or "new_route") + "_gne"
-    _fname = st.text_input("ファイル名", value=_default, key="_dialog_fname")
+                .removesuffix(".gpx").removesuffix("_gne") or "new_route")
+    _fname = st.text_input("ファイル名", value=_default,
+                           key="_dialog_fname", label_visibility="collapsed")
+    st.caption(f"保存ファイル名: {_fname}_gne.gpx")
 
     # ── GPX生成 ────────────────────────────────────
-    _route_name = _fname.removesuffix("_gne")
     _xml = build_enhanced_gpx(
         st.session_state.get("_raw_gpx"),
         route_points,
         elev_choice,
-        route_name=_route_name,
+        route_name=_fname,
     )
 
     # ── ネットワーク保存 ────────────────────────────
@@ -1627,7 +1630,20 @@ def _save_gpx_dialog(route_points, elev_choice):
     )
     st.session_state["_cloud_save_pref"] = _upload_to_cloud
 
+    _supabase_fname = _fname
+    _needs_ascii = _upload_to_cloud and not _fname.isascii()
+    if _needs_ascii:
+        st.warning("ファイル名に2byte文字が含まれています。半角英数字のみでファイル名を付け直してください。")
+        _supabase_fname = st.text_input(
+            "Supabase用ファイル名",
+            key="_dialog_supabase_fname",
+            placeholder="例: osanpo_14km",
+        )
+        if _supabase_fname:
+            st.caption(f"Supabaseに保存されるファイル名: {_supabase_fname}_gne.gpx")
+
     # ── ボタン行 ───────────────────────────────────
+    _dl_disabled = _needs_ascii and not _supabase_fname
     _dc1, _dc2 = st.columns(2)
     with _dc1:
         if st.button("キャンセル", use_container_width=True, key="_dialog_cancel"):
@@ -1637,16 +1653,17 @@ def _save_gpx_dialog(route_points, elev_choice):
         if st.download_button(
             "⬇️ ダウンロード",
             data=_xml,
-            file_name=f"{_fname}.gpx",
+            file_name=f"{_fname}_gne.gpx",
             mime="application/gpx+xml",
             type="primary",
             use_container_width=True,
             key="_dialog_dl",
+            disabled=_dl_disabled,
         ):
             if _upload_to_cloud:
                 from supabase_client import upload_gpx
                 with st.spinner("☁️ アップロード中…"):
-                    _ok, _msg = upload_gpx(_xml, _fname)
+                    _ok, _msg = upload_gpx(_xml, f"{_supabase_fname}_gne")
                 if _ok:
                     st.success("✅ ネットワークに保存しました")
                     st.caption(_msg)
