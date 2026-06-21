@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.6.2"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -653,7 +653,7 @@ def compute_grade_stats(points, elevations):
 # GPX ビルダー（マッチング・標高補正対応）
 # ─────────────────────────────────────────────
 
-def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
+def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org", route_name=None):
     coords = [(p["lat"], p["lon"]) for p in route_points]
     elevs  = [p["ele_fix"] if elev_choice == "fix" else p["ele_org"] for p in route_points]
 
@@ -673,6 +673,8 @@ def build_enhanced_gpx(gpx_content_str, route_points, elev_choice="org"):
         _new_seg.points.append(pt)
     if enhanced.tracks:
         enhanced.tracks[0].segments = [_new_seg]
+        if route_name and not enhanced.tracks[0].name:
+            enhanced.tracks[0].name = route_name
 
     # ターンポイントを再構築
     enhanced.waypoints = []
@@ -1531,6 +1533,7 @@ with col_list:
             with col_d:
                 if st.button("🗑", key=f"del_{list_idx}", help="削除"):
                     route_points[trkpt_idx]["wpt"] = None
+                    route_points[trkpt_idx]["is_acpt"] = True
                     st.session_state["route_points"] = route_points
                     st.rerun()
 
@@ -1608,10 +1611,12 @@ def _save_gpx_dialog(route_points, elev_choice):
     _fname = st.text_input("ファイル名", value=_default, key="_dialog_fname")
 
     # ── GPX生成 ────────────────────────────────────
+    _route_name = _fname.removesuffix("_gne")
     _xml = build_enhanced_gpx(
         st.session_state.get("_raw_gpx"),
         route_points,
         elev_choice,
+        route_name=_route_name,
     )
 
     # ── ネットワーク保存 ────────────────────────────
