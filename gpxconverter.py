@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.5.5"
+APP_VERSION = "3.6.0"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -1614,6 +1614,14 @@ def _save_gpx_dialog(route_points, elev_choice):
         elev_choice,
     )
 
+    # ── ネットワーク保存 ────────────────────────────
+    _upload_to_cloud = st.checkbox(
+        "☁️ ネットワーク上にも保存",
+        value=st.session_state.get("_cloud_save_pref", False),
+        help="Supabase ストレージ（gpx_routes）にバックアップします",
+    )
+    st.session_state["_cloud_save_pref"] = _upload_to_cloud
+
     # ── ボタン行 ───────────────────────────────────
     _dc1, _dc2 = st.columns(2)
     with _dc1:
@@ -1630,6 +1638,16 @@ def _save_gpx_dialog(route_points, elev_choice):
             use_container_width=True,
             key="_dialog_dl",
         ):
+            if _upload_to_cloud:
+                from supabase_client import upload_gpx
+                with st.spinner("☁️ アップロード中…"):
+                    _ok, _msg = upload_gpx(_xml, _fname)
+                if _ok:
+                    st.success("✅ ネットワークに保存しました")
+                    st.caption(_msg)
+                else:
+                    st.error(f"⚠️ アップロード失敗: {_msg}")
+                    st.stop()
             st.session_state.pop("_save_dialog", None)
             st.rerun()
 
