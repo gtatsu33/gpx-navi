@@ -241,6 +241,7 @@
 </div>
 
 <script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 'use strict';
@@ -1260,19 +1261,19 @@ if ('serviceWorker' in navigator) {
 // ── Supabase ──────────────────────────────────────────
 const SUPABASE_URL = window.SUPABASE_URL || '';
 const SUPABASE_KEY = window.SUPABASE_KEY || '';
-const SB_HEADERS   = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 async function openNetworkPicker() {
   const modal = document.getElementById('network-modal');
   modal.style.display = 'block';
   document.getElementById('network-route-list').innerHTML = '<div class="modal-loading">⏳ 読み込み中...</div>';
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/route_files?order=created_at.desc`,
-      { headers: SB_HEADERS }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    renderNetworkRouteList(await res.json());
+    const { data, error } = await sbClient
+      .from('route_files')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    renderNetworkRouteList(data);
   } catch (e) {
     document.getElementById('network-route-list').innerHTML =
       `<div class="modal-loading">⚠️ 取得失敗: ${escHtml(String(e))}</div>`;
@@ -1320,12 +1321,11 @@ async function loadNetworkRoute(fileKey, displayName) {
   bar.style.width = '0%';
 
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/storage/v1/object/gpx_routes/${encodeURIComponent(fileKey)}`,
-      { headers: SB_HEADERS }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const gpxText = await res.text();
+    const { data: blob, error: dlErr } = await sbClient
+      .storage.from('gpx_routes')
+      .download(fileKey);
+    if (dlErr) throw new Error(dlErr.message);
+    const gpxText = await blob.text();
 
     const parsed = parseGPX(gpxText);
     if (parsed.track.length < 2) throw new Error('GPXの解析に失敗しました');
