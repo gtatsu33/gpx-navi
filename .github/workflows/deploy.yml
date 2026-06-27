@@ -25,10 +25,11 @@ jobs:
 
       - name: Create config.js from secrets
         run: |
-          cat > config.js << 'EOF'
-          window.SUPABASE_URL = '${{ secrets.SUPABASE_URL }}';
-          window.SUPABASE_KEY = '${{ secrets.SUPABASE_KEY }}';
-          EOF
+          echo "window.SUPABASE_URL = '${{ secrets.SUPABASE_URL }}';" > config.js
+          echo "window.SUPABASE_KEY = '${{ secrets.SUPABASE_KEY }}';" >> config.js
+          echo "--- 生成されたconfig.js（secretsはマスクされます）---"
+          cat config.js
+          ls -la config.js
 
       - uses: actions/configure-pages@v5
 
