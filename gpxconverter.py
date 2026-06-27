@@ -22,7 +22,7 @@ from rdp import rdp as rdp_simplify
 import plotly.graph_objects as go
 import xml.etree.ElementTree as ET
 
-APP_VERSION = "3.6.6"
+APP_VERSION = "3.8.0"
 
 _GPX_NS      = "http://www.topografix.com/GPX/1/1"
 _GPXNAVI_NS  = "https://gpxnavi"
@@ -760,6 +760,118 @@ _STATE_KEYS = [
     "_gpx_filename",
 ]
 
+@st.dialog("☁️ ネットワークから読み込む")
+def _network_picker_dialog():
+    import pandas as pd
+    from supabase_client import list_routes, download_gpx as _dl_gpx
+    _is_actual_ride_n = "実走行データ" in st.session_state.get("_data_type_radio", "")
+
+    # スタート画面のグローバルCSSがダイアログ内columnsに影響するためリセット
+    st.markdown("""<style>
+div[data-testid="stDialog"] div[data-testid="stColumn"] > div:first-child {
+    background: unset !important; border: unset !important;
+    padding: unset !important; box-shadow: unset !important;
+    min-height: unset !important; border-radius: unset !important;
+}
+</style>""", unsafe_allow_html=True)
+
+    # ルートリストは初回のみ取得してキャッシュ（チェック操作のrerrunで再取得しない）
+    if "_net_routes_cache" not in st.session_state:
+        with st.spinner("ルート一覧を取得中…"):
+            _ok, _fetched = list_routes()
+        if not _ok:
+            st.error(f"取得に失敗しました: {_fetched}")
+            return
+        if not _fetched:
+            st.info("ネットワーク上にルートがありません。")
+            return
+        st.session_state["_net_routes_cache"] = _fetched
+
+    _routes = st.session_state["_net_routes_cache"]
+
+    def _fmt_dist(r):
+        return f"{r['distance_m'] / 1000:.1f} km" if r["distance_m"] is not None else "---"
+    def _fmt_gain(r):
+        return f"{int(r['elevation_gain_m'])} m" if r["elevation_gain_m"] is not None else "---"
+
+    _prev_idx = st.session_state.get("_net_sel_idx")
+
+    _df = pd.DataFrame([{
+        "": i == _prev_idx,
+        "ルート名": r["display_name"],
+        "距離": _fmt_dist(r),
+        "獲得標高": _fmt_gain(r),
+    } for i, r in enumerate(_routes)])
+
+    _edited = st.data_editor(
+        _df,
+        width="stretch",
+        hide_index=True,
+        disabled=["ルート名", "距離", "獲得標高"],
+        column_config={
+            "": st.column_config.CheckboxColumn("", width="small"),
+            "ルート名": st.column_config.TextColumn("ルート名"),
+            "距離": st.column_config.TextColumn("距離", width="small"),
+            "獲得標高": st.column_config.TextColumn("獲得標高", width="small"),
+        },
+        key=f"_net_editor_{_prev_idx}",
+    )
+
+    # 単一選択を強制（複数チェック時は新しい方だけ残す）
+    _checked = [i for i, v in enumerate(_edited[""]) if v]
+    if len(_checked) > 1:
+        _new = [i for i in _checked if i != _prev_idx]
+        st.session_state["_net_sel_idx"] = _new[0] if _new else _checked[-1]
+        st.rerun()
+    elif len(_checked) == 1 and _checked[0] != _prev_idx:
+        st.session_state["_net_sel_idx"] = _checked[0]
+        st.rerun()
+    elif len(_checked) == 0 and _prev_idx is not None:
+        st.session_state["_net_sel_idx"] = None
+        st.rerun()
+
+    _sel_idx = st.session_state.get("_net_sel_idx")
+    _selected = _routes[_sel_idx] if _sel_idx is not None else None
+
+    st.divider()
+    if _selected:
+        st.markdown(f"**{_selected['display_name']}**")
+        _dc1, _dc2 = st.columns(2)
+        with _dc1:
+            st.markdown(f"距離　**{_fmt_dist(_selected)}**")
+        with _dc2:
+            st.markdown(f"獲得標高　**{_fmt_gain(_selected)}**")
+    else:
+        st.caption("チェックボックスでルートを選択してください")
+
+    def _clear_net_state():
+        st.session_state.pop("_net_dialog_open", None)
+        st.session_state.pop("_net_routes_cache", None)
+        st.session_state.pop("_net_sel_idx", None)
+
+    _nc1, _nc2 = st.columns(2)
+    with _nc1:
+        if st.button("キャンセル", use_container_width=True, key="_net_cancel"):
+            _clear_net_state()
+            st.rerun()
+    with _nc2:
+        if st.button("読み込む →", use_container_width=True, type="primary",
+                     key="_net_load", disabled=_selected is None):
+            with st.spinner("ダウンロード中…"):
+                _ok2, _content = _dl_gpx(_selected["file_key"])
+            if not _ok2:
+                st.error(f"ダウンロード失敗: {_content}")
+                return
+            _fk = f"{_selected['file_key']}_{_is_actual_ride_n}"
+            _clear_net_state()
+            for k in _STATE_KEYS:
+                st.session_state.pop(k, None)
+            st.session_state["_file_key"]     = _fk
+            st.session_state["_raw_gpx"]      = _content
+            st.session_state["_gpx_filename"] = _selected["file_key"]
+            st.rerun()
+
+
 # 編集モード判定：ファイル読込済み または 新規ルートモード
 _in_editing = (st.session_state.get("_file_key") is not None
                or st.session_state.get("_new_route_mode"))
@@ -801,8 +913,14 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
             key="_data_type_radio",
             help="実走行データはマップマッチング・間引きを自動実行します",
         )
-        _uploaded_start = st.file_uploader("GPXファイルをアップロード",
-                                            label_visibility="collapsed")
+        _uploaded_start = st.file_uploader(
+            "📁 ローカルストレージから読み込む",
+            label_visibility="visible",
+        )
+        st.markdown("☁️ ネットワークから読み込む")
+        if st.button("🔍 ルートを選ぶ", use_container_width=True):
+            st.session_state["_net_dialog_open"] = True
+            st.rerun()
 
     with _col_new:
         st.markdown("#### ✏️ 新規ルートを作成する")
@@ -835,6 +953,9 @@ div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:nth-child(2) 
         st.session_state["_raw_gpx"]       = _uploaded_start.read().decode("utf-8")
         st.session_state["_gpx_filename"]  = _uploaded_start.name
         st.rerun()
+
+    if st.session_state.get("_net_dialog_open"):
+        _network_picker_dialog()
 
     st.stop()
 
@@ -1117,6 +1238,7 @@ if any(e is not None for e in _elevs_for_gain):
     )
     _gain_str = f"{_gain:.0f} m"
 else:
+    _gain = None
     _gain_str = "--- m"
 
 c1, c2, c3 = st.columns(3)
@@ -1663,12 +1785,17 @@ def _save_gpx_dialog(route_points, elev_choice):
             if _upload_to_cloud:
                 from supabase_client import upload_gpx
                 with st.spinner("☁️ アップロード中…"):
-                    _ok, _msg = upload_gpx(_xml, f"{_supabase_fname}_gne")
+                    _ok, _msg, _err_type = upload_gpx(
+                        _xml,
+                        f"{_supabase_fname}_gne",
+                        display_name=_fname,
+                        distance_m=round(total_dist_km * 1000),
+                        elevation_gain_m=round(_gain) if _gain is not None else None,
+                    )
                 if _ok:
                     st.success("✅ ネットワークに保存しました")
-                    st.caption(_msg)
                 else:
-                    st.error(f"⚠️ アップロード失敗: {_msg}")
+                    st.error(f"⚠️ {_msg}")
                     st.stop()
             st.session_state.pop("_save_dialog", None)
             st.rerun()
