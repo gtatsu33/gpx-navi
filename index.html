@@ -705,7 +705,7 @@ function initMap() {
     .bindTooltip('スタート').addTo(map);
   L.marker([track[track.length-1].lat, track[track.length-1].lon],
     { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11], className:'' }) })
-    .bindTooltip(goalWpt.name).addTo(map);
+    .bindTooltip(waypoints[waypoints.length - 1].name).addTo(map);
 
   // ターンポイントをマップに描画（ゴールセンチネルは除く）
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {

@@ -53,6 +53,11 @@ function getTurnColor(bc: number): string {
   return '#2ed573';
 }
 
+function formatDistParts(m: number): { value: string; unit: string } {
+  if (m >= 1000) return { value: (m / 1000).toFixed(1), unit: 'km' };
+  return { value: String(Math.round(m)), unit: 'm' };
+}
+
 function formatDistVoice(m: number): string {
   return m >= 1000
     ? `${(Math.round(m / 100) / 10).toFixed(1)}キロメートル`
@@ -620,7 +625,10 @@ export default function NavigationScreen({ route, navigation }: Props) {
       {/* Stats overlay */}
       <View style={styles.statsOverlay}>
         <Text style={styles.statLabel}>残り距離</Text>
-        <Text style={styles.statValue}>{formatDist(remainingDist)}</Text>
+        <Text style={styles.statValue}>
+          {formatDistParts(remainingDist).value}
+          <Text style={styles.statUnit}>{formatDistParts(remainingDist).unit}</Text>
+        </Text>
         <Text style={[styles.statLabel, { marginTop: 6 }]}>経過時間</Text>
         <Text style={styles.statValue}>{formatTime(elapsed)}</Text>
       </View>
@@ -724,7 +732,8 @@ const styles = StyleSheet.create({
     width: 110, height: 90, justifyContent: 'center',
   },
   statLabel: { color: '#bbb', fontSize: 10 },
-  statValue: { color: '#fff', fontSize: 17, fontWeight: 'bold' },
+  statValue: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
+  statUnit:  { color: '#fff', fontSize: 11, fontWeight: 'bold' },
 
   zoomBtns: {
     position: 'absolute', bottom: 110, right: 12,
