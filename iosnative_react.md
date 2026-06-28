@@ -8,7 +8,6 @@ Web 版と Native 版を同一リポジトリで共存させ、共通ロジッ�
 ---
 
 ## リポジトリ構成
-
 ```
 gpx-navi/
 ├── index.html          # 既存 Web PWA（そのまま維持）

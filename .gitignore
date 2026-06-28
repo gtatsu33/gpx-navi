@@ -19,3 +19,10 @@ ramen_photos/
 .env
 config.js
 
+ios/.env
+
+# macOS
+.DS_Store
+
+# Root-level artifacts
+package-lock.json

@@ -185,8 +185,8 @@
   <div class="list-header">
     <h1>gpx-navi</h1>
     <div style="display:flex;gap:8px">
-      <button class="btn-net" onclick="openNetworkPicker()">☁️</button>
-      <button class="btn-add" onclick="openFilePicker()">＋ ルート追加</button>
+      <button class="btn-net" onclick="openFilePicker()">📂</button>
+      <button class="btn-add" onclick="openNetworkPicker()">☁️ ルート追加</button>
     </div>
   </div>
   <div id="import-progress">
@@ -243,6 +243,9 @@
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="shared/gpxParser.js"></script>
+<script src="shared/geoCalc.js"></script>
+<script src="shared/supabaseApi.js"></script>
 <script>
 'use strict';
 
@@ -287,63 +290,6 @@ const dbSave   = r  => dbTx('readwrite', s => s.add(r));
 const dbGetAll = () => dbTx('readonly',  s => s.getAll());
 const dbDelete = id => dbTx('readwrite', s => s.delete(id));
 
-// ── GPX Parser ────────────────────────────────────────
-function parseGPX(text) {
-  const doc = new DOMParser().parseFromString(text, 'text/xml');
-  const NS  = 'http://www.topografix.com/GPX/1/1';
-  // getElementsByTagNameNS と getElementsByTagName の両方を試し、
-  // 多い方（実際に要素が入っている方）を使う。両方使うと重複する。
-  const getEls = (p, t) => {
-    const withNS = [...p.getElementsByTagNameNS(NS, t)];
-    const withoutNS = [...p.getElementsByTagName(t)];
-    return withNS.length >= withoutNS.length ? withNS : withoutNS;
-  };
-  const getText = (p, t) => { const el = getEls(p, t)[0]; return el ? el.textContent.trim() : ''; };
-
-  const name = getText(doc, 'name') || getText(doc, 'n') || 'ルート';
-
-  const track = [];
-  let prevKey = null;
-  for (const el of getEls(doc, 'trkpt')) {
-    const lat = parseFloat(el.getAttribute('lat'));
-    const lon = parseFloat(el.getAttribute('lon'));
-    if (isNaN(lat) || isNaN(lon)) continue;
-    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
-    if (key === prevKey) continue;
-    prevKey = key;
-    const ele = parseFloat(getText(el, 'ele'));
-    track.push({ lat, lon, ele: isNaN(ele) ? null : ele });
-  }
-
-  const turns = getEls(doc, 'wpt').map(el => {
-    const bc = parseFloat((getText(el, 'desc') || '').replace('bearing_change:', ''));
-    return {
-      lat:  parseFloat(el.getAttribute('lat')),
-      lon:  parseFloat(el.getAttribute('lon')),
-      name: getText(el, 'name') || getText(el, 'n') || '通過点',
-      bearingChange: bc,
-    };
-  }).filter(p => !isNaN(p.lat) && !isNaN(p.lon));
-
-  return { name, track, turns };
-}
-
-// ── Geo Utils ─────────────────────────────────────────
-function geoDist(lat1, lon1, lat2, lon2) {
-  const R = 6371000, dL = (lat2-lat1)*Math.PI/180, dN = (lon2-lon1)*Math.PI/180;
-  const a = Math.sin(dL/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dN/2)**2;
-  return R * 2 * Math.asin(Math.sqrt(Math.min(1, a)));
-}
-const formatDist = m => m >= 1000 ? `${(m/1000).toFixed(1)}km` : `${Math.round(m)}m`;
-
-function latLonToTile(lat, lon, z) {
-  const n = 2**z;
-  return {
-    x: Math.floor((lon+180)/360*n),
-    y: Math.floor((1 - Math.log(Math.tan(lat*Math.PI/180) + 1/Math.cos(lat*Math.PI/180))/Math.PI)/2*n)
-  };
-}
-
 // ── Tile Prefetch ─────────────────────────────────────
 async function prefetchTiles(track, onProgress) {
   if (!('caches' in window)) { onProgress?.(1,1); return; }
@@ -370,18 +316,6 @@ async function prefetchTiles(track, onProgress) {
 
 // ── List Screen ───────────────────────────────────────
 function openFilePicker() { document.getElementById('file-input').click(); }
-
-// turns[] の各wptに trkIdx を付加する
-function buildWptTrkMapping(track, turns) {
-  return turns.map(wp => {
-    let bestIdx = 0, bestD = Infinity;
-    for (let i = 0; i < track.length; i++) {
-      const d = geoDist(wp.lat, wp.lon, track[i].lat, track[i].lon);
-      if (d < bestD) { bestD = d; bestIdx = i; }
-    }
-    return { ...wp, trkIdx: bestIdx };
-  });
-}
 async function handleFileImport(event) {
   const file = event.target.files[0];
   if (!file) return;
@@ -512,60 +446,6 @@ function dbgLog(msg) {
   el.scrollTop = el.scrollHeight;
   console.log(msg);
 }
-// ── 勾配プロファイル関連 ──────────────────────────────
-
-function buildTrackGrads(track) {
-  if (!track || track.length < 2) return [];
-  if (!track.some(p => p.ele != null)) return [];
-
-  const cumDists = [0];
-  for (let i = 1; i < track.length; i++)
-    cumDists.push(cumDists[i-1] + geoDist(track[i-1].lat, track[i-1].lon, track[i].lat, track[i].lon));
-
-  // ① スムージング（窓幅を広げてノイズを除去）
-  const smooth = track.map((_, i) => {
-    let sum = 0, weightSum = 0;
-    const R = 40; // 前後40mを参照
-    for (let j = Math.max(0, i - 15); j < Math.min(track.length, i + 15); j++) {
-      const d = Math.abs(cumDists[i] - cumDists[j]);
-      if (d <= R) {
-        const w = 1 - d / R;
-        sum += track[j].ele * w;
-        weightSum += w;
-      }
-    }
-    return weightSum > 0 ? sum / weightSum : track[i].ele;
-  });
-
-  // ② 中央差分による勾配計算（見た目の位置ズレを解消）
-  const GRADE_WIN = 20; // 前後20m（計40m）で判定
-  return track.map((_, i) => {
-    let grade = 0;
-    let pIdx = i, nIdx = i;
-    while (pIdx > 0 && cumDists[i] - cumDists[pIdx] < GRADE_WIN) pIdx--;
-    while (nIdx < track.length - 1 && cumDists[nIdx] - cumDists[i] < GRADE_WIN) nIdx++;
-
-    const dist = cumDists[nIdx] - cumDists[pIdx];
-    if (dist > 15) { // 最低15m以上の区間で計算
-      grade = ((smooth[nIdx] - smooth[pIdx]) / dist) * 100;
-    }
-    return { 
-      cumDist: cumDists[i], 
-      ele: smooth[i], 
-      grade: Math.max(-25, Math.min(25, grade)) 
-    };
-  });
-}
-
-
-function gradeColor(g) {
-  if (g < 3)   return '#2ed573';  // 下り〜ほぼ平坦: 緑
-  if (g < 6)   return '#ffd32a';  // やや上り: 黄
-  if (g < 9)   return '#ff6348';  // 上り: オレンジ
-  if (g < 12)  return '#ff0000';  // 急坂: 赤
-  return '#4C2E30';               // 激坂: エンジ
-}
-
 function updateCurrentTrkIdx(lat, lon) {
   if (!currentRoute) return;
   const track = currentRoute.track;
@@ -792,7 +672,7 @@ async function startNavigation(routeId, isReverse = false) {
     ...navTurns.map(t => ({
       lat: t.lat, lon: t.lon, name: t.name, bearingChange: t.bearingChange, isGoal: false, trkIdx: t.trkIdx
     })),
-    { lat: goalWpt.lat, lon: goalWpt.lon, name: 'ゴール', isGoal: true }
+    { lat: goalWpt.lat, lon: goalWpt.lon, name: goalWpt.name, isGoal: true }
   ];
   targetIdx = 0;
 
@@ -825,7 +705,7 @@ function initMap() {
     .bindTooltip('スタート').addTo(map);
   L.marker([track[track.length-1].lat, track[track.length-1].lon],
     { icon: L.divIcon({ html: '<div style="font-size:22px">🏁</div>', iconSize:[22,22], iconAnchor:[11,11], className:'' }) })
-    .bindTooltip('ゴール').addTo(map);
+    .bindTooltip(goalWpt.name).addTo(map);
 
   // ターンポイントをマップに描画（ゴールセンチネルは除く）
   waypoints.filter(wp => !wp.isGoal).forEach((wp, i) => {
@@ -885,12 +765,13 @@ const formatDistVoice = m => m >= 1000
 // d0: 現在地 → 新しい目標までの距離
 function buildAnnouncePhases(d0, wpName, isGoal) {
   const poi   = !isGoal && wpName.startsWith('「') && wpName.endsWith('」');
-  const label = isGoal ? 'ゴール' : spokenName(wpName);
+  const label = spokenName(wpName) || (isGoal ? '目的地' : '交差点');
 
   phasesBuilt = true;
 
-  const closeTxt = isGoal ? '目的地です' : (poi ? `${label}です` : `${label}してください`);
-  const nearTxt  = isGoal ? 'まもなく目的地です' : `まもなく${label}です`;
+  const closeSuffix = /やや[右左]/.test(label) ? 'に曲がってください' : 'してください';
+  const closeTxt = isGoal ? `${label}です` : (poi ? `${label}です` : `${label}${closeSuffix}`);
+  const nearTxt  = `まもなく${label}です`;
 
   if (d0 > 300) {
     announcePhases = [
@@ -998,8 +879,8 @@ function checkWaypointAdvance(lat, lon) {
     // NEAR_DIST より大きい閾値を使ってよい（GPS誤差を吸収）。
     if (wp.isGoal) {
       if (dist < 30) {
-        setNavMsg('🏁', 'ゴール！', 'お疲れ様でした！');
-        speakNow('目的地です。お疲れ様でした！');
+        setNavMsg('🏁', `${wp.name}！`, 'お疲れ様でした！');
+        speakNow(`${wp.name}です。お疲れ様でした！`);
         document.getElementById('turn-next').innerHTML =
           '<span class="next-label">次：</span><span class="next-val">コース完走！</span>';
         targetIdx++;
@@ -1073,7 +954,7 @@ function updateNavPanel(lat, lon) {
   document.getElementById('turn-arrow').style.color           = s.color;
   document.getElementById('turn-distance').textContent        = formatDist(dist);
   document.getElementById('turn-distance').style.color        = s.color;
-  document.getElementById('turn-direction').textContent       = wp.isGoal ? 'このままゴールへ' : `先 ${displayName(wp.name)}`;
+  document.getElementById('turn-direction').textContent       = wp.isGoal ? `このまま${displayName(wp.name)}へ` : `先 ${displayName(wp.name)}`;
 
   // 次のウェイポイント情報waypoints
   const next = waypoints[targetIdx + 1];
@@ -1081,7 +962,7 @@ function updateNavPanel(lat, lon) {
     const ns  = next.isGoal ? getTurnStyle('直進維持') : getTurnStyle(bcToTurnName(next.bearingChange));
     const nd  = geoDist(lat, lon, next.lat, next.lon);
     document.getElementById('turn-next').innerHTML = next.isGoal
-      ? `<span class="next-label">次：</span><span class="next-val">このターン後はゴールまで直進</span>`
+      ? `<span class="next-label">次：</span><span class="next-val">このターン後は${displayName(next.name)}まで直進</span>`
       : `<span class="next-label">次：</span><span class="next-val" style="color:${ns.color}">${ns.arrow} ${displayName(next.name)}</span><span class="next-val">　${formatDist(nd)}先</span>`;
   } else if (!wp.isGoal) {
     document.getElementById('turn-next').innerHTML =
@@ -1268,11 +1149,7 @@ async function openNetworkPicker() {
   modal.style.display = 'block';
   document.getElementById('network-route-list').innerHTML = '<div class="modal-loading">⏳ 読み込み中...</div>';
   try {
-    const { data, error } = await sbClient
-      .from('route_files')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (error) throw new Error(error.message);
+    const data = await fetchRouteList(sbClient);
     renderNetworkRouteList(data);
   } catch (e) {
     document.getElementById('network-route-list').innerHTML =
@@ -1321,11 +1198,7 @@ async function loadNetworkRoute(fileKey, displayName) {
   bar.style.width = '0%';
 
   try {
-    const { data: blob, error: dlErr } = await sbClient
-      .storage.from('gpx_routes')
-      .download(fileKey);
-    if (dlErr) throw new Error(dlErr.message);
-    const gpxText = await blob.text();
+    const gpxText = await downloadGpxFile(sbClient, fileKey);
 
     const parsed = parseGPX(gpxText);
     if (parsed.track.length < 2) throw new Error('GPXの解析に失敗しました');
