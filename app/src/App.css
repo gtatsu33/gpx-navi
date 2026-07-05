@@ -1,0 +1,264 @@
+.editor {
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  text-align: left;
+}
+
+.editor h1 {
+  flex-shrink: 0;
+  font-size: 22px;
+  margin: 0 0 12px;
+  letter-spacing: normal;
+}
+
+.app-version {
+  font-size: 0.5em;
+  color: #9ca3af;
+  font-weight: normal;
+  vertical-align: middle;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.error {
+  color: #c0392b;
+}
+
+.metric {
+  font-weight: bold;
+}
+
+.status-badge {
+  font-size: 0.85em;
+  color: #555;
+}
+
+.status-badge.warn {
+  color: #b45309;
+}
+
+.status-badge-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.actual-ride-toggle {
+  font-size: 0.85em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-box {
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 280px;
+}
+
+.progress-bar-track {
+  background: #e5e7eb;
+  border-radius: 4px;
+  height: 10px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+
+.progress-bar-fill {
+  background: #3498db;
+  height: 100%;
+  transition: width 0.2s;
+}
+
+.save-dialog {
+  min-width: 380px;
+}
+
+.save-dialog label {
+  display: block;
+  margin: 8px 0;
+}
+
+.save-dialog input[type='text'] {
+  margin-left: 8px;
+}
+
+.save-filename-preview {
+  font-size: 0.85em;
+  color: #666;
+}
+
+.ele-forced-note {
+  color: #b45309;
+  font-size: 0.9em;
+}
+
+.ele-choice label {
+  display: block;
+}
+
+.save-dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.start-modal {
+  min-width: 640px;
+  max-width: 90vw;
+}
+
+.start-modal-cards {
+  display: flex;
+  gap: 16px;
+}
+
+.start-card {
+  flex: 1;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.start-radio {
+  display: block;
+  margin: 4px 0;
+}
+
+.start-help {
+  font-size: 0.85em;
+  color: #666;
+}
+
+.start-feature-list {
+  padding-left: 20px;
+  font-size: 0.9em;
+}
+
+.network-picker {
+  min-width: 420px;
+}
+
+.network-route-list {
+  list-style: none;
+  padding: 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.main-area {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+.map-col {
+  flex: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.list-col {
+  flex: 1;
+  min-width: 260px;
+  min-height: 0;
+  display: flex;
+}
+
+.map-view {
+  flex: 1;
+  min-height: 0;
+}
+
+.elevation-chart {
+  display: block;
+  flex-shrink: 0;
+  margin-top: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  cursor: crosshair;
+}
+
+.turn-point-list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.turn-point-list h3 {
+  flex-shrink: 0;
+  margin: 0 0 8px;
+}
+
+.tpl-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.tpl-warning {
+  color: #b45309;
+  font-size: 0.85em;
+  flex-shrink: 0;
+}
+
+.tpl-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tpl-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.tpl-center-btn {
+  flex: 2;
+  text-align: left;
+  font-size: 0.75em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tpl-row input {
+  flex: 3;
+  min-width: 0;
+}
