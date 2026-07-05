@@ -319,6 +319,41 @@ describe('routeReducer', () => {
       expect(next.routePoints[2]).toMatchObject({ isAcpt: true, wpt: { name: '目的地', delta: null } })
     })
 
+    it('eleSourceGsi=trueならele_orgと同じ値をele_fixにも複製する（5-4章・16-2章）', () => {
+      const state = initialRouteState()
+      const next = routeReducer(state, {
+        type: 'LOAD_PARSED_GPX',
+        payload: {
+          trkpts: [
+            { lat: 35.0, lon: 139.0, ele: 10 },
+            { lat: 35.001, lon: 139.0, ele: 12 },
+            { lat: 35.002, lon: 139.0, ele: 14 },
+          ],
+          waypoints: [],
+          eleSourceGsi: true,
+        },
+      })
+      expect(next.routePoints.map((p) => p.eleFix)).toEqual(next.routePoints.map((p) => p.eleOrg))
+      expect(next.gradeFix).toEqual(next.gradeOrg)
+    })
+
+    it('eleSourceGsiが無ければele_fixはnullのまま（従来通り）', () => {
+      const state = initialRouteState()
+      const next = routeReducer(state, {
+        type: 'LOAD_PARSED_GPX',
+        payload: {
+          trkpts: [
+            { lat: 35.0, lon: 139.0, ele: 10 },
+            { lat: 35.001, lon: 139.0, ele: 12 },
+            { lat: 35.002, lon: 139.0, ele: 14 },
+          ],
+          waypoints: [],
+        },
+      })
+      expect(next.routePoints.every((p) => p.eleFix === null)).toBe(true)
+      expect(next.gradeFix).toBeNull()
+    })
+
     it('gpxnavi:acpt拡張タグが2点以上あれば、それを中間点も含めて採用する', () => {
       const state = initialRouteState()
       const next = routeReducer(state, {

@@ -208,9 +208,9 @@ const MapView = forwardRef(function MapView(
     wpts.forEach((w, i) => {
       let marker
       if (i === 0) {
-        marker = L.marker([w.lat, w.lng], { icon: pinIcon('#27ae60', 'S') }).bindTooltip(`スタート: ${w.name}`)
+        marker = L.marker([w.lat, w.lng], { icon: pinIcon('#27ae60', 'S') }).bindTooltip(`スタート: ${w.name}（右クリックで削除確認）`)
       } else if (i === wpts.length - 1) {
-        marker = L.marker([w.lat, w.lng], { icon: pinIcon('#c0392b', 'G') }).bindTooltip(`ゴール: ${w.name}`)
+        marker = L.marker([w.lat, w.lng], { icon: pinIcon('#c0392b', 'G') }).bindTooltip(`ゴール: ${w.name}（右クリックで削除確認）`)
       } else {
         marker = L.circleMarker([w.lat, w.lng], {
           radius: 9,
@@ -218,7 +218,7 @@ const MapView = forwardRef(function MapView(
           fillColor: w.color,
           fillOpacity: 0.9,
           weight: 2,
-        }).bindTooltip(`wpt:${i + 1} ${w.name}`)
+        }).bindTooltip(`wpt:${i + 1} ${w.name}（右クリックで削除確認）`)
       }
       marker.on('click', (e) => {
         L.DomEvent.stopPropagation(e)
@@ -231,6 +231,14 @@ const MapView = forwardRef(function MapView(
         } else {
           emitEvent({ type: 'wpt_click', wptIdx: i })
         }
+      })
+      marker.on('contextmenu', (e) => {
+        L.DomEvent.stopPropagation(e)
+        L.DomEvent.preventDefault(e)
+        openActionPopup(map, e.latlng, [
+          { label: '🗑 削除する', onClick: () => emitEvent({ type: 'wpt_delete', trkptIdx: w.trkptIdx }) },
+          { label: '✖ 何もしない', onClick: () => {} },
+        ])
       })
       addLayer(marker)
     })

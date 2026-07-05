@@ -16,7 +16,7 @@ import { combineTurnName } from '../lib/turns.js'
  * spec.txt 6章。LOAD_PARSED_GPX（ルートデータ）・LOAD_MATCHED_ROUTE
  * （実走行データ、マップマッチング後）の両方から使う共通ロジック。
  */
-function buildInitialRoutePoints(points, elevations, waypoints, acptIndices, turnAssignments) {
+function buildInitialRoutePoints(points, elevations, waypoints, acptIndices, turnAssignments, eleSourceGsi) {
   const useExtensionAcpts = acptIndices && acptIndices.size >= 2
   const rp = points.map(([lat, lon], i) =>
     makeRoutePoint(lat, lon, {
@@ -33,6 +33,18 @@ function buildInitialRoutePoints(points, elevations, waypoints, acptIndices, tur
       rp[i] = { ...rp[i], eleOrg: v }
     })
     gradeOrg = computeGradeStats(points, cleaned)
+  }
+
+  // spec.txt 5-4章・16-2章: 読み込んだGPXが既に国土地理院データ（eleSource=gsi）
+  // であれば、ele_fixにも同じ値を入れておき、保存画面での無駄な再取得を避ける。
+  let gradeFix = null
+  if (eleSourceGsi) {
+    rp.forEach((p, i) => {
+      if (p.eleOrg !== null && p.eleOrg !== undefined) {
+        rp[i] = { ...rp[i], eleFix: p.eleOrg }
+      }
+    })
+    gradeFix = gradeOrg
   }
 
   if (waypoints.length && rp.length) {
@@ -67,7 +79,7 @@ function buildInitialRoutePoints(points, elevations, waypoints, acptIndices, tur
     rp[rp.length - 1] = { ...rp[rp.length - 1], wpt: { name: '目的地', delta: null } }
   }
 
-  return { rp, gradeOrg }
+  return { rp, gradeOrg, gradeFix }
 }
 
 export function initialRouteState() {
@@ -327,20 +339,20 @@ export function routeReducer(state, action) {
     // 結果（spec.txt 6章・11章・12章、非同期のOverpass呼び出しを伴うため
     // reducerの外で計算する）。
     case 'LOAD_PARSED_GPX': {
-      const { trkpts, waypoints, acptIndices, turnAssignments } = action.payload
+      const { trkpts, waypoints, acptIndices, turnAssignments, eleSourceGsi } = action.payload
       const points = trkpts.map((t) => [t.lat, t.lon])
       const elevations = trkpts.map((t) => t.ele)
-      const { rp, gradeOrg } = buildInitialRoutePoints(points, elevations, waypoints, acptIndices, turnAssignments)
-      return { ...state, routePoints: rp, undoSnapshot: null, routeModified: false, gradeOrg, gradeFix: null }
+      const { rp, gradeOrg, gradeFix } = buildInitialRoutePoints(points, elevations, waypoints, acptIndices, turnAssignments, eleSourceGsi)
+      return { ...state, routePoints: rp, undoSnapshot: null, routeModified: false, gradeOrg, gradeFix }
     }
 
     // Phase8: 実走行データのマップマッチング後に読み込む。spec.txt 6章・10章。
     // 呼び出し側（App.jsx）でRDP間引き→マップマッチングまで完了させ、
     // マッチング後の座標列と、間引き前インデックスで対応付けた元標高を渡す。
     case 'LOAD_MATCHED_ROUTE': {
-      const { matchedPoints, origElevations, waypoints, acptIndices, turnAssignments } = action.payload
-      const { rp, gradeOrg } = buildInitialRoutePoints(matchedPoints, origElevations, waypoints, acptIndices, turnAssignments)
-      return { ...state, routePoints: rp, undoSnapshot: null, routeModified: false, gradeOrg, gradeFix: null }
+      const { matchedPoints, origElevations, waypoints, acptIndices, turnAssignments, eleSourceGsi } = action.payload
+      const { rp, gradeOrg, gradeFix } = buildInitialRoutePoints(matchedPoints, origElevations, waypoints, acptIndices, turnAssignments, eleSourceGsi)
+      return { ...state, routePoints: rp, undoSnapshot: null, routeModified: false, gradeOrg, gradeFix }
     }
 
     // 13-2章: リアルタイム背景取得で1点分のele_fixが確定した際に反映する。

@@ -1,5 +1,5 @@
 ================================================================================
-  gpx-navi エディター（gpxconverter）実装仕様書
+  gpx-editor（gpxconverter）実装仕様書
   バージョン: 0.1（作成中）
   作成日: 2026-07-04
   ※ 本書は spec.txt（実装非依存の仕様書）を、HTML+JS版（app/ 配下、
@@ -234,7 +234,7 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
   Reactでは単一の useReducer + Context に置き換える。
 
   理由: spec.txt 8章の地図イベント（click_empty / acpt_drag_end /
-  acpt_delete / dialog_result(extend|acpt|wpt) / wpt_click）は、それぞれが
+  acpt_delete / dialog_result(extend|acpt|wpt) / wpt_click / wpt_delete）は、それぞれが
   「現在のroute_pointsを受け取り、新しいroute_pointsを返す」純粋な変換
   として書ける（実際、元のPython実装もほぼそうなっている）。これは
   reducerのaction/caseにそのまま対応させやすく、Python側のロジックを
@@ -439,21 +439,22 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
   テーブル（route_files）・ストレージバケット（gpx_routes）の構造は
   spec.txt 17-5章のスキーマをそのまま踏襲する。
 
-  【重要・要対応】鍵の切り替え:
+  【対応済み】鍵の切り替え:
     現行のconfig.jsにはSupabaseの service_role キー（RLSを無視する
     全権限キー。新API key体系ではSecret keyに相当）がブラウザ向けJSに
-    そのまま埋め込まれている。これをHTML+JS版に持ち越すと、公開サイトに
-    全権限キーを配布することになり危険。移行時に以下を行う:
-      - Publishable（公開）キーに切り替える（2025年導入の新API key体系。
+    そのまま埋め込まれていた。HTML+JS版では以下の対応を完了している:
+      - Publishable（公開）キーに切り替え済み（2025年導入の新API key体系。
         旧anonキーと同等の低権限。旧anon/service_roleキーは2026年末までに
-        廃止予定のため新形式を使う）
-      - Supabase側でRLSポリシーを設定し、route_filesテーブルおよび
+        廃止予定のため新形式を使用）
+      - Supabase側でRLSポリシーを設定済み。route_filesテーブルおよび
         gpx_routesバケットに対して「匿名ユーザーによる
         INSERT/SELECT」「匿名ユーザーによるStorageのupload/download」
-        を許可するポリシーを明示的に作成する（本アプリはspec.txt通り
-        無認証前提のため、ブロックはせず対象を絞った許可にする）
-    これはコードだけでは完結せず、Supabaseダッシュボード側の設定
-    変更が必要な作業であることに注意（移行時のチェックリスト項目とする）
+        を許可するポリシーを作成済み（本アプリはspec.txt通り
+        無認証前提のため、ブロックはせず対象を絞った許可にしている。
+        Owner一人のみが使う運用でも、Supabase Auth未導入のため
+        anonロールへの許可は必須。アプリが落ち着いたら認証追加を検討）
+    ローカル動作・Cloudflare Pages本番デプロイの双方で動作確認済み
+    （2026-07-05）。
 
   Supabaseクライアントの初期化キー（URL・Publishable key）はビルド時の環境変数
   （import.meta.env.VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY）から
@@ -639,9 +640,9 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
     16章のバージョン管理（APP_VERSION）を実装し、15章のビルド・デプロイ設定
     を確定させる。PWA化（manifest/service worker）は行わない（2026-07-04
     決定。spec.txtに要件がなく、通常の静的サイトとして配信すれば十分な
-    ため）。実際のCloudflare Pagesへのデプロイ操作（プロジェクト作成・
-    環境変数登録等）はユーザー自身が行うため、本フェーズではapp/DEPLOY.md
-    に手順書をまとめるところまでとする。
+    ため）。実際のCloudflare Pagesへのデプロイ（プロジェクト作成・
+    環境変数登録等、app/DEPLOY.md記載の手順）もユーザー自身により実施済み。
+    本番環境での動作確認済み（2026-07-05）。
 
 ────────────────────────────────────────
   移行期間中の扱い
@@ -710,7 +711,7 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
     変更不要
 
 ────────────────────────────────────────
-18-5. Overpass API のレート制限（要対応）
+18-5. Overpass API のレート制限（対応済み）
 ────────────────────────────────────────
 
   公式のフェアユース方針が明確に存在する:
@@ -720,8 +721,8 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
     - 小さいリクエストは大きいリクエストより優先される
     - 頻繁に叩くユーザーから優先度を下げられる（負荷分散）
 
-  【修正・追加】8章／14章の交差点名取得（lib/overpass.js）の実装方針に
-  以下を追加する:
+  【対応済み】8章／14章の交差点名取得（lib/overpass.js）の実装方針に
+  以下を反映済み:
     - HTTP 429 を受け取った場合は、単純な「次のミラーURLを試す」だけでなく、
       少し待ってから同一または別ミラーに再試行する（429は恒久的な
       失敗ではなくレート制限なので、即座に諦めない）

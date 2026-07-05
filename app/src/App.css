@@ -35,6 +35,83 @@
   color: #c0392b;
 }
 
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-h);
+  transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+}
+
+button.btn-primary {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  border-color: var(--btn-primary-bg);
+  box-shadow: 0 2px 6px rgba(147, 51, 234, 0.35);
+}
+
+button.btn-primary:hover:not(:disabled) {
+  background: var(--btn-primary-bg-hover);
+  border-color: var(--btn-primary-bg-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(147, 51, 234, 0.4);
+}
+
+button.btn-secondary {
+  background: transparent;
+  color: var(--text-h);
+  border-color: var(--border);
+}
+
+button.btn-secondary:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+button.btn-danger {
+  background: var(--btn-danger-bg);
+  color: #fff;
+  border-color: var(--btn-danger-bg);
+}
+
+button.btn-danger:hover:not(:disabled) {
+  background: var(--btn-danger-bg-hover);
+  border-color: var(--btn-danger-bg-hover);
+  transform: translateY(-1px);
+}
+
+button.btn-icon {
+  padding: 6px 10px;
+  line-height: 1;
+}
+
+button.btn-danger.btn-icon {
+  background: transparent;
+  color: var(--btn-danger-bg);
+  border-color: var(--btn-danger-bg);
+  box-shadow: none;
+}
+
+button.btn-danger.btn-icon:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.12);
+  color: var(--btn-danger-bg-hover);
+  border-color: var(--btn-danger-bg-hover);
+  transform: none;
+}
+
 .metric {
   font-weight: bold;
 }
@@ -70,14 +147,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  /* Leafletの地図コントロール（.leaflet-top/.leaflet-bottom）がz-index:1000の
+     ため、同値だとDOM順序次第で地図側が手前に出てしまう。確実に上に表示する。 */
+  z-index: 2000;
 }
 
 .modal-box {
   background: white;
-  border-radius: 8px;
-  padding: 20px;
+  border-radius: 12px;
+  padding: 24px;
   min-width: 280px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
 }
 
 .progress-bar-track {
@@ -96,6 +177,14 @@
 
 .save-dialog {
   min-width: 380px;
+}
+
+.save-dialog-inner {
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 16px;
+  background: var(--accent-bg);
 }
 
 .save-dialog label {
@@ -140,9 +229,34 @@
 
 .start-card {
   flex: 1;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 16px;
+  background: var(--accent-bg);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.start-card:hover {
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
+}
+
+.start-load-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.start-load-buttons button {
+  width: 100%;
+}
+
+.start-file-input {
+  display: none;
 }
 
 .start-radio {
@@ -158,6 +272,11 @@
 .start-feature-list {
   padding-left: 20px;
   font-size: 0.9em;
+}
+
+.start-card > button {
+  width: 100%;
+  margin-top: auto;
 }
 
 .network-picker {
@@ -208,7 +327,7 @@
 }
 
 .turn-point-list {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
   display: flex;
@@ -216,6 +335,7 @@
   min-height: 0;
   width: 100%;
   box-sizing: border-box;
+  background: var(--accent-bg-soft);
 }
 
 .turn-point-list h3 {
@@ -242,6 +362,30 @@
   overflow-y: auto;
 }
 
+.tpl-header-row {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
+  font-size: 0.7em;
+  color: var(--text);
+}
+
+.tpl-header-cols {
+  flex: 0 0 108px;
+  display: flex;
+}
+
+.tpl-header-spacer-input {
+  flex: 1;
+}
+
+.tpl-header-spacer-btn {
+  width: 38px;
+  flex-shrink: 0;
+}
+
 .tpl-row {
   display: flex;
   align-items: center;
@@ -250,15 +394,74 @@
 }
 
 .tpl-center-btn {
-  flex: 2;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
   text-align: left;
   font-size: 0.75em;
+  overflow: hidden;
+  background: transparent;
+  border-color: transparent;
+  padding: 6px 8px;
+  height: 34px;
+  box-sizing: border-box;
+}
+
+.tpl-center-btn:hover:not(:disabled) {
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+}
+
+.tpl-col-idx,
+.tpl-col-dir,
+.tpl-col-trkpt {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.tpl-col-idx {
+  width: 36px;
+  flex-shrink: 0;
+}
+
+.tpl-col-dir {
+  width: 24px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.tpl-col-trkpt {
+  width: 48px;
+  flex-shrink: 0;
+}
+
+.text-input,
 .tpl-row input {
-  flex: 3;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.text-input:focus,
+.tpl-row input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.tpl-row input {
+  flex: 1;
   min-width: 0;
+}
+
+.tpl-row .btn-icon {
+  width: 38px;
+  height: 34px;
+  padding: 0;
+  box-sizing: border-box;
 }

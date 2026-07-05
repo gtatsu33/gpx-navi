@@ -31,9 +31,12 @@ function App() {
   stateRef.current = state
   const [error, setError] = useState(null)
   const [focusCenter, setFocusCenter] = useState(null)
+  const [focusWpt, setFocusWpt] = useState(null)
   const [hoveredKm, setHoveredKm] = useState(null)
   const [rawGpxString, setRawGpxString] = useState(null)
   const [gpxFilename, setGpxFilename] = useState('')
+  const [trackName, setTrackName] = useState(null)
+  const [eleSourceGsi, setEleSourceGsi] = useState(false)
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [showNetworkDialog, setShowNetworkDialog] = useState(false)
   const [started, setStarted] = useState(false)
@@ -56,7 +59,7 @@ function App() {
   }
 
   async function loadGpxText(text, filename, isActualRide) {
-    const { trkpts, waypoints, acptIndices } = parseGpx(text)
+    const { trkpts, waypoints, acptIndices, eleSourceGsi, trackName: parsedTrackName } = parseGpx(text)
     if (trkpts.length < 6) {
       setError('トラックポイントが少なすぎます。')
       return
@@ -64,6 +67,8 @@ function App() {
     setError(null)
     setRawGpxString(text)
     setGpxFilename(filename.replace(/\.(gpx|xml)$/i, '').replace(/_gne$/i, ''))
+    setTrackName(parsedTrackName || null)
+    setEleSourceGsi(eleSourceGsi)
 
     const hasWpts = waypoints.length > 0
     if (isActualRide && !hasWpts) {
@@ -76,14 +81,14 @@ function App() {
       const turnAssignments = await detectAndNameTurns(matchedPoints)
       dispatch({
         type: 'LOAD_MATCHED_ROUTE',
-        payload: { matchedPoints, origElevations, waypoints, acptIndices, turnAssignments },
+        payload: { matchedPoints, origElevations, waypoints, acptIndices, turnAssignments, eleSourceGsi },
       })
     } else if (!hasWpts) {
       const points = trkpts.map((t) => [t.lat, t.lon])
       const turnAssignments = await detectAndNameTurns(points)
-      dispatch({ type: 'LOAD_PARSED_GPX', payload: { trkpts, waypoints, acptIndices, turnAssignments } })
+      dispatch({ type: 'LOAD_PARSED_GPX', payload: { trkpts, waypoints, acptIndices, turnAssignments, eleSourceGsi } })
     } else {
-      dispatch({ type: 'LOAD_PARSED_GPX', payload: { trkpts, waypoints, acptIndices } })
+      dispatch({ type: 'LOAD_PARSED_GPX', payload: { trkpts, waypoints, acptIndices, eleSourceGsi } })
     }
     setStarted(true)
   }
@@ -113,6 +118,8 @@ function App() {
   }
 
   function handleNewRoute() {
+    setTrackName(null)
+    setEleSourceGsi(false)
     setStarted(true)
   }
 
@@ -120,6 +127,8 @@ function App() {
     dispatch({ type: 'RESET' })
     setRawGpxString(null)
     setGpxFilename('')
+    setTrackName(null)
+    setEleSourceGsi(false)
     setError(null)
     setShowDiscardConfirm(false)
     setStarted(false)
@@ -207,11 +216,17 @@ function App() {
       return
     }
 
+    if (evt.type === 'wpt_delete') {
+      dispatch({ type: 'DELETE_WPT', payload: { trkptIndex: evt.trkptIdx } })
+      return
+    }
+
     if (evt.type === 'wpt_click') {
       const wpts = rp.map((p, i) => (p.wpt ? { i } : null)).filter(Boolean)
       const target = wpts[evt.wptIdx]
       if (target) {
         setFocusCenter({ lat: rp[target.i].lat, lng: rp[target.i].lon })
+        setFocusWpt({ trkptIdx: target.i })
       }
       dispatch({ type: 'WPT_CLICK', payload: { wptIndex: evt.wptIdx } })
     }
@@ -226,6 +241,7 @@ function App() {
       const wpts = rp.map((p, i) => (p.wpt ? { i } : null)).filter(Boolean)
       const wptIdx = wpts.findIndex((w) => w.i === idx)
       setFocusCenter({ lat: rp[idx].lat, lng: rp[idx].lon })
+      setFocusWpt({ trkptIdx: idx })
       dispatch({ type: 'WPT_CLICK', payload: { wptIndex: wptIdx } })
     } else {
       mapViewRef.current?.openInsertMenuAtTrkpt(idx)
@@ -296,10 +312,13 @@ function App() {
     return { trkptsForMap, acptsForMap, wptsForMap, center, totalDistKm, gainM }
   }, [state.routePoints, state.eleChoice])
 
+  // spec.txt 4章: GPXのトラック名 → ファイル名 → 新規ルート の優先順で決定
+  const routeDisplayName = trackName || gpxFilename || '新規ルート'
+
   return (
     <div className="editor">
       <h1>
-        🚴 gpx-navi エディター <span className="app-version">v{APP_VERSION}</span>
+        🚴 gpx-editor <span className="app-version">v{APP_VERSION}</span>
       </h1>
       {!started && (
         <StartModal
@@ -311,15 +330,21 @@ function App() {
       )}
       <div className="toolbar">
         {started && (
-          <button type="button" onClick={() => setShowDiscardConfirm(true)}>
+          <button type="button" className="btn-secondary" onClick={() => setShowDiscardConfirm(true)}>
             ↩ 編集を破棄して戻る
           </button>
         )}
         {error && <span className="error">{error}</span>}
-        {state.routePoints.length > 0 && <span className="metric">総距離 {totalDistKm.toFixed(1)} km</span>}
+        {state.routePoints.length > 0 && (
+          <span className="metric">
+            {routeDisplayName}
+            {eleSourceGsi && '（GSI標高）'}
+            　総距離 {totalDistKm.toFixed(1)} km　獲得標高 {gainM !== null ? `${Math.round(gainM)} m` : '--- m'}
+          </span>
+        )}
         {state.routePoints.length > 0 && <StatusBadge status={eleStatus} onRetry={retryEleFailed} />}
         {state.routePoints.length > 0 && (
-          <button type="button" disabled={wptsForMap.length === 0} onClick={() => setShowSaveDialog(true)}>
+          <button type="button" className="btn-primary" disabled={wptsForMap.length === 0} onClick={() => setShowSaveDialog(true)}>
             💾 ルートを保存
           </button>
         )}
@@ -373,6 +398,7 @@ function App() {
             dispatch={dispatch}
             onDetectTurns={handleDetectTurns}
             onFocus={setFocusCenter}
+            focusWpt={focusWpt}
           />
         </div>
       </div>

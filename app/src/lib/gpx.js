@@ -44,7 +44,16 @@ export function parseGpx(xmlString) {
     desc: textOf(el.getElementsByTagNameNS(GPX_NS, 'desc')[0]),
   }))
 
-  const trkNameEl = doc.getElementsByTagNameNS(GPX_NS, 'trk')[0]?.getElementsByTagNameNS(GPX_NS, 'name')[0]
+  const trkEl = doc.getElementsByTagNameNS(GPX_NS, 'trk')[0]
+  const trkNameEl = trkEl?.getElementsByTagNameNS(GPX_NS, 'name')[0]
+
+  // spec.txt 5-4章: trk/extensions/gpxnavi:eleSource="gsi" は、このファイルの
+  // 標高値が既に国土地理院データ（スパイク除去済み）であることを示す。
+  // 保存時（16-2章）の無駄な再取得を避けるために使う。
+  let eleSourceGsi = false
+  const trkExtEl = trkEl?.getElementsByTagNameNS(GPX_NS, 'extensions')[0]
+  const eleSourceEl = trkExtEl?.getElementsByTagNameNS(GPXNAVI_NS, 'eleSource')[0]
+  if (eleSourceEl && textOf(eleSourceEl) === 'gsi') eleSourceGsi = true
 
   return {
     trkpts,
@@ -52,6 +61,7 @@ export function parseGpx(xmlString) {
     hasWpts: waypoints.length > 0,
     acptIndices,
     trackName: trkNameEl ? textOf(trkNameEl) : null,
+    eleSourceGsi,
   }
 }
 
@@ -77,6 +87,17 @@ export function buildGpx({ baseXmlString, routePoints, eleChoice = 'org', routeN
     gpxEl.appendChild(trkEl)
   }
   Array.from(trkEl.getElementsByTagNameNS(GPX_NS, 'trkseg')).forEach((el) => trkEl.removeChild(el))
+
+  // spec.txt 5-4章・16-2章: 出力するele値が国土地理院データ（fix）の場合のみ
+  // eleSourceフラグを付与する。org選択時や既存フラグは常に一旦取り除く。
+  Array.from(trkEl.getElementsByTagNameNS(GPX_NS, 'extensions')).forEach((el) => trkEl.removeChild(el))
+  if (eleChoice === 'fix') {
+    const trkExtEl = doc.createElementNS(GPX_NS, 'extensions')
+    const eleSourceEl = doc.createElementNS(GPXNAVI_NS, 'gpxnavi:eleSource')
+    eleSourceEl.textContent = 'gsi'
+    trkExtEl.appendChild(eleSourceEl)
+    trkEl.appendChild(trkExtEl)
+  }
 
   const existingNameEl = trkEl.getElementsByTagNameNS(GPX_NS, 'name')[0]
   if (!existingNameEl && routeName) {

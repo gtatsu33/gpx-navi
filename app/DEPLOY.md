@@ -1,4 +1,4 @@
-# gpx-navi エディター（HTML+JS版）Cloudflare Pages デプロイ手順
+# gpx-editor（HTML+JS版）Cloudflare Pages デプロイ手順
 
 implement.txt 15章の決定に基づき、この `app/` ディレクトリを既存の
 GitHub Pages配信（リポジトリ直下の `index.html`、gpx-navi本体アプリ）とは

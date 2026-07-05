@@ -82,10 +82,10 @@ export default function NetworkPickerDialog({ onCancel, onLoaded }) {
         {downloadError && <p className="error">ダウンロード失敗: {downloadError}</p>}
 
         <div className="save-dialog-buttons">
-          <button type="button" onClick={onCancel}>
+          <button type="button" className="btn-secondary" onClick={onCancel}>
             キャンセル
           </button>
-          <button type="button" disabled={selected === null || downloading} onClick={handleLoad}>
+          <button type="button" className="btn-primary" disabled={selected === null || downloading} onClick={handleLoad}>
             {downloading ? 'ダウンロード中…' : '読み込む →'}
           </button>
         </div>
