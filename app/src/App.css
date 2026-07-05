@@ -112,6 +112,10 @@ button.btn-danger.btn-icon:hover:not(:disabled) {
   transform: none;
 }
 
+.btn-save-route {
+  margin-left: auto;
+}
+
 .metric {
   font-weight: bold;
 }

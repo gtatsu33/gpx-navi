@@ -344,7 +344,7 @@ function App() {
         )}
         {state.routePoints.length > 0 && <StatusBadge status={eleStatus} onRetry={retryEleFailed} />}
         {state.routePoints.length > 0 && (
-          <button type="button" className="btn-primary" disabled={wptsForMap.length === 0} onClick={() => setShowSaveDialog(true)}>
+          <button type="button" className="btn-primary btn-save-route" disabled={wptsForMap.length === 0} onClick={() => setShowSaveDialog(true)}>
             💾 ルートを保存
           </button>
         )}
