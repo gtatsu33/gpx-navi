@@ -15,7 +15,7 @@ function recommendChoice(gradeOrg, gradeFix, orgOk, fixOk) {
   if (orgOk && fixOk) {
     const so = gradeOrg.max + Math.abs(gradeOrg.min)
     const sf = gradeFix.max + Math.abs(gradeFix.min)
-    return sf < so ? 'fix' : 'org'
+    return sf <= so ? 'fix' : 'org'
   }
   if (fixOk) return 'fix'
   return 'org'
