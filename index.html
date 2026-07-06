@@ -47,13 +47,48 @@
     #screen-list { background: var(--bg); overflow-y: auto; }
 
     .list-header {
+      position: relative;
       padding: 20px 20px 0;
       padding-top: max(20px, calc(var(--sat) + 12px));
       display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
     }
     .list-header h1 { font-family: var(--font-num); font-size: 24px; font-weight: 900; letter-spacing: -0.5px; color: var(--accent); }
     .list-header h1 span { color: var(--text); }
-    .btn-add { background: var(--accent); color: var(--bg); border: none; border-radius: 10px; padding: 10px 18px; font-size: 15px; font-weight: 700; font-family: var(--font-jp); cursor: pointer; }
+    .list-header h1 .app-version { font-size: 12px; font-weight: 400; margin-left: 4px; }
+
+    .header-right { display: flex; align-items: center; gap: 8px; }
+    .header-label { font-size: 14px; color: var(--muted); font-family: var(--font-jp); margin-right: 2px; }
+
+    .icon-btn {
+      background: transparent; color: var(--accent); border: 1px solid var(--accent);
+      border-radius: 10px; width: 38px; height: 38px; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 17px; cursor: pointer; flex-shrink: 0;
+    }
+    .icon-btn:active { opacity: 0.7; }
+    .icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .login-popover {
+      position: absolute; top: 100%; right: 20px; margin-top: 8px; z-index: 50;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px; min-width: 220px;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .login-popover p { font-size: 13px; color: var(--text); }
+    .login-popover p.error { color: var(--right); }
+    .popover-input {
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 8px; padding: 8px 10px; font-size: 14px; font-family: var(--font-jp);
+    }
+    .popover-btn-primary {
+      background: var(--accent); color: var(--bg); border: none; border-radius: 8px;
+      padding: 8px 12px; font-size: 14px; font-weight: 700; font-family: var(--font-jp); cursor: pointer;
+    }
+    .popover-btn-secondary {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px; font-size: 14px; font-family: var(--font-jp); cursor: pointer;
+    }
 
     .list-body {
       padding: 16px 20px;
@@ -153,8 +188,6 @@
     #btn-grade.grade-on { background: #1a3a2a; color: var(--go); border: 1px solid var(--go); }
 
     /* ══ NETWORK MODAL ══ */
-    .btn-net { background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 10px; padding: 9px 13px; font-size: 17px; cursor: pointer; flex-shrink: 0; }
-    .btn-net:active { opacity: 0.7; }
     #network-modal { display: none; position: fixed; inset: 0; z-index: 2000; }
     .modal-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.7); }
     .modal-sheet {
@@ -183,11 +216,14 @@
 
 <div id="screen-list" class="screen active">
   <div class="list-header">
-    <h1>gpx-navi</h1>
-    <div style="display:flex;gap:8px">
-      <button class="btn-net" onclick="openFilePicker()">📂</button>
-      <button class="btn-add" onclick="openNetworkPicker()">☁️ ルート追加</button>
+    <h1>gpx-navi <span class="app-version" id="app-version-label"></span></h1>
+    <div class="header-right">
+      <span class="header-label">ルート追加</span>
+      <button class="icon-btn" id="btn-local" onclick="openFilePicker()" title="ローカルから読み込む">📂</button>
+      <button class="icon-btn" id="btn-cloud" onclick="openNetworkPicker()" disabled title="読み込み中…">☁️</button>
+      <button class="icon-btn" id="btn-gear" onclick="toggleLoginPopover()" title="招待ユーザー向けログイン">⚙️</button>
     </div>
+    <div id="login-popover" class="login-popover" style="display:none"></div>
   </div>
   <div id="import-progress">
     <span id="import-msg">⏳ インポート中...</span>
@@ -248,6 +284,11 @@
 <script src="shared/supabaseApi.js"></script>
 <script>
 'use strict';
+
+// CLAUDE.mdのバージョン管理ルール（パッチ/マイナー/メジャー）をこの定数に適用する。
+// Python版・gpx-editor版とは別建ての独立したバージョン系列。
+const APP_VERSION = '1.0.0';
+document.getElementById('app-version-label').textContent = `v${APP_VERSION}`;
 
 // ── 定数 ──────────────────────────────────────────────
 const DB_NAME      = 'gpxnav-db';
@@ -1144,7 +1185,92 @@ const SUPABASE_URL = window.SUPABASE_URL || '';
 const SUPABASE_KEY = window.SUPABASE_KEY || '';
 const sbClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ── 招待制ログイン（Supabase Auth マジックリンク） ─────────
+// gpx-editorと同じ方針。クラウドからの読み込みのみ招待ユーザー限定とし、
+// それ以外の機能（ローカル読み込み・ナビ本体）は無認証のまま使える。
+let currentUser = null;
+
+async function initAuth() {
+  const { data } = await sbClient.auth.getSession();
+  currentUser = data.session?.user ?? null;
+  updateAuthUI();
+  sbClient.auth.onAuthStateChange((_event, session) => {
+    currentUser = session?.user ?? null;
+    updateAuthUI();
+  });
+}
+
+function updateAuthUI() {
+  const btnCloud = document.getElementById('btn-cloud');
+  const isLoggedIn = !!currentUser;
+  btnCloud.disabled = !isLoggedIn;
+  btnCloud.title = isLoggedIn ? 'クラウドから読み込む' : '招待ユーザー限定の機能です';
+  renderLoginPopover();
+}
+
+function toggleLoginPopover() {
+  const el = document.getElementById('login-popover');
+  const willOpen = el.style.display === 'none';
+  el.style.display = willOpen ? 'flex' : 'none';
+  if (willOpen) renderLoginPopover();
+}
+
+function closeLoginPopover() {
+  document.getElementById('login-popover').style.display = 'none';
+}
+
+function renderLoginPopover() {
+  const el = document.getElementById('login-popover');
+  if (el.style.display === 'none') return;
+  if (currentUser) {
+    el.innerHTML = `
+      <p>ログイン中: ${escHtml(currentUser.email)}</p>
+      <button type="button" class="popover-btn-secondary" onclick="handleSignOut()">ログアウト</button>
+    `;
+  } else {
+    el.innerHTML = `
+      <p>招待ユーザー向けログイン</p>
+      <input type="email" id="login-email-input" class="popover-input" placeholder="メールアドレス">
+      <button type="button" class="popover-btn-primary" id="login-send-btn" onclick="handleSendMagicLink()">ログインリンクを送る</button>
+      <button type="button" class="popover-btn-secondary" onclick="closeLoginPopover()">キャンセル</button>
+      <p id="login-result-msg"></p>
+    `;
+  }
+}
+
+async function handleSendMagicLink() {
+  const input = document.getElementById('login-email-input');
+  const email = input.value.trim();
+  if (!email) return;
+  const btn = document.getElementById('login-send-btn');
+  const msgEl = document.getElementById('login-result-msg');
+  btn.disabled = true;
+  btn.textContent = '送信中…';
+  const { error } = await sbClient.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin },
+  });
+  btn.disabled = false;
+  btn.textContent = 'ログインリンクを送る';
+  if (error) {
+    msgEl.textContent = `送信に失敗しました: ${error.message}`;
+    msgEl.className = 'error';
+  } else {
+    msgEl.textContent = 'メールを確認してください。';
+    msgEl.className = '';
+  }
+}
+
+async function handleSignOut() {
+  await sbClient.auth.signOut();
+  closeLoginPopover();
+}
+
 async function openNetworkPicker() {
+  if (!currentUser) {
+    showToast('招待ユーザー限定の機能です');
+    return;
+  }
   const modal = document.getElementById('network-modal');
   modal.style.display = 'block';
   document.getElementById('network-route-list').innerHTML = '<div class="modal-loading">⏳ 読み込み中...</div>';
@@ -1232,6 +1358,7 @@ async function loadNetworkRoute(fileKey, displayName) {
 
 // ── Init ──────────────────────────────────────────────
 openDB().then(renderRouteList);
+initAuth();
 </script>
 </body>
 </html>
