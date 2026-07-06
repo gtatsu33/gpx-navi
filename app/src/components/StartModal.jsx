@@ -47,6 +47,9 @@ function LoginPopover({ isLoggedIn, userEmail, onSendMagicLink, onSignOut }) {
               <button type="button" className="btn-primary" onClick={handleSend} disabled={!email || sending}>
                 {sending ? '送信中…' : 'ログインリンクを送る'}
               </button>
+              <button type="button" className="btn-secondary" onClick={() => setOpen(false)}>
+                キャンセル
+              </button>
               {result && result.ok && <p>メールを確認してください。</p>}
               {result && !result.ok && <p className="error">送信に失敗しました: {result.error}</p>}
             </>
