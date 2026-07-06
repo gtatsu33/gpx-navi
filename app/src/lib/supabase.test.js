@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { downloadGpx, listRoutes, uploadGpx } from './supabase.js'
+import { downloadGpx, getSession, listRoutes, onAuthStateChange, sendMagicLink, signOut, uploadGpx } from './supabase.js'
 
 function makeMockClient({ uploadError = null, insertError = null, removeSpy = vi.fn() } = {}) {
   return {
@@ -77,5 +77,55 @@ describe('downloadGpx', () => {
     }
     const result = await downloadGpx('a.gpx', { client })
     expect(result).toEqual({ ok: true, content: '<gpx/>' })
+  })
+})
+
+describe('招待制ログイン（Supabase Auth マジックリンク）', () => {
+  it('sendMagicLink: 正常系はok:trueを返す', async () => {
+    const signInWithOtp = vi.fn().mockResolvedValue({ error: null })
+    const client = { auth: { signInWithOtp } }
+    const result = await sendMagicLink('a@example.com', { client })
+    expect(result).toEqual({ ok: true })
+    expect(signInWithOtp).toHaveBeenCalledWith({
+      email: 'a@example.com',
+      options: { emailRedirectTo: expect.any(String) },
+    })
+  })
+
+  it('sendMagicLink: エラー時はok:falseを返す', async () => {
+    const client = { auth: { signInWithOtp: vi.fn().mockResolvedValue({ error: { message: 'invalid email' } }) } }
+    const result = await sendMagicLink('bad', { client })
+    expect(result).toEqual({ ok: false, error: 'invalid email' })
+  })
+
+  it('getSession: セッションを返す', async () => {
+    const session = { user: { email: 'a@example.com' } }
+    const client = { auth: { getSession: vi.fn().mockResolvedValue({ data: { session } }) } }
+    const result = await getSession({ client })
+    expect(result).toBe(session)
+  })
+
+  it('onAuthStateChange: コールバックを購読し、unsubscribeで解除できる', () => {
+    const unsubscribe = vi.fn()
+    const client = {
+      auth: {
+        onAuthStateChange: vi.fn((cb) => {
+          cb('SIGNED_IN', { user: { email: 'a@example.com' } })
+          return { data: { subscription: { unsubscribe } } }
+        }),
+      },
+    }
+    const callback = vi.fn()
+    const unsub = onAuthStateChange(callback, { client })
+    expect(callback).toHaveBeenCalledWith({ user: { email: 'a@example.com' } })
+    unsub()
+    expect(unsubscribe).toHaveBeenCalled()
+  })
+
+  it('signOut: client.auth.signOutを呼ぶ', async () => {
+    const signOutFn = vi.fn().mockResolvedValue({})
+    const client = { auth: { signOut: signOutFn } }
+    await signOut({ client })
+    expect(signOutFn).toHaveBeenCalled()
   })
 })

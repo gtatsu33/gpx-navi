@@ -40,6 +40,7 @@ export default function SaveDialog({
   totalDistKm,
   gainM,
   onClose,
+  isLoggedIn,
 }) {
   const [checkStatus, setCheckStatus] = useState({ phase: 'checking', done: 0, total: 0 })
   const [filename, setFilename] = useState(defaultFilename)
@@ -162,9 +163,18 @@ export default function SaveDialog({
               <p className="save-filename-preview">保存ファイル名: {filename}_gne.gpx</p>
 
               <label>
-                <input type="checkbox" checked={uploadToCloud} onChange={(e) => setUploadToCloud(e.target.checked)} disabled={!isSupabaseConfigured()} />
+                <input
+                  type="checkbox"
+                  checked={uploadToCloud}
+                  onChange={(e) => setUploadToCloud(e.target.checked)}
+                  disabled={!isSupabaseConfigured() || !isLoggedIn}
+                  title={!isLoggedIn ? '招待ユーザー限定の機能です' : undefined}
+                />
                 ☁️ クラウドにも保存
                 {!isSupabaseConfigured() && <span className="ele-forced-note"> （Supabase未設定のため利用できません）</span>}
+                {isSupabaseConfigured() && !isLoggedIn && (
+                  <span className="ele-forced-note"> （招待ユーザー限定の機能です）</span>
+                )}
               </label>
 
               {needsAsciiName && (

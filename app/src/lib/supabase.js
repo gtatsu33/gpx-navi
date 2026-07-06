@@ -79,3 +79,30 @@ export async function downloadGpx(fileKey, { client = defaultClient() } = {}) {
   const content = await data.text()
   return { ok: true, content }
 }
+
+/**
+ * 招待制ログイン（Supabase Auth マジックリンク）。spec.txt 19章／implement.txt 13章。
+ * サインアップは行わない（Supabaseダッシュボードで事前にInviteされたユーザーのみ）。
+ */
+export async function sendMagicLink(email, { client = defaultClient() } = {}) {
+  const { error } = await client.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin },
+  })
+  if (error) return { ok: false, error: error.message || String(error) }
+  return { ok: true }
+}
+
+export async function getSession({ client = defaultClient() } = {}) {
+  const { data } = await client.auth.getSession()
+  return data.session
+}
+
+export function onAuthStateChange(callback, { client = defaultClient() } = {}) {
+  const { data } = client.auth.onAuthStateChange((_event, session) => callback(session))
+  return () => data.subscription.unsubscribe()
+}
+
+export async function signOut({ client = defaultClient() } = {}) {
+  await client.auth.signOut()
+}

@@ -7,38 +7,78 @@ GitHub Pages配信（リポジトリ直下の `index.html`、gpx-navi本体ア�
 ## 0. 前提: Supabase側の準備（必須）
 
 デプロイ前に、Supabaseダッシュボードで以下を必ず済ませておくこと
-（implement.txt 13章）。
+（implement.txt 13章、spec.txt 19章「招待制クラウド機能」）。
 
-1. **Publishable keyの取得**
-   - Supabaseは2025年に新しいAPIキー体系（Publishable key / Secret key）を
-     導入しており、旧来の `anon` / `service_role` キー（JWT形式）は
-     2026年末までに廃止予定。新規実装では新形式を使う。
-   - `Secret key`（全権限、`sb_secret_...`）ではなく `Publishable key`
-     （公開用、`sb_publishable_...`、旧`anon`キーと同等の低権限）を使う。
-   - Publishable keyは Supabaseダッシュボード → Project Settings →
-     API Keys →「Publishable key」から取得する。
-   - RLSポリシーの働き方は旧`anon`キーと同じ。
-2. **招待ユーザーの登録（Supabase Auth、spec.txt 19章）**
-   - Authentication → Sign in / Providers → Email で、一般ユーザーの
-     自己サインアップ（Allow new users to sign up）を無効化する。
-   - Authentication → Users →「Invite user」で、クラウド機能を使わせたい
-     友人のメールアドレスを個別に登録する（マジックリンクが届く）。
-   - Authentication → URL Configuration → Redirect URLs に、本番URL
-     （例: `https://xxxx.pages.dev`）とローカル開発URL
-     （例: `http://localhost:5173`）を登録する。
-3. **RLSポリシーの設定**
-   - `route_files` テーブル: `authenticated` ロールによる
-     `INSERT` / `SELECT` を許可するポリシーを作成する
-     （`anon`ロールへの許可は行わない）。
-   - `gpx_routes` ストレージバケット: `authenticated` ロールによる
-     `upload` / `download` を許可するポリシーを作成する。
-   - クラウド保存・読み込みは招待ユーザー限定の機能とするため
-     （spec.txt 19章）、ログイン済み（authenticated）ユーザーのみに
-     絞る。ブロックしたままだと招待ユーザーもクラウド機能を使えない。
-   - 【注意】この設定変更により、同一Supabaseプロジェクトをanonキーで
-     読み書きしているiOSアプリ（`ios/`）は、Supabase Auth対応するまで
-     一時的にクラウド機能が使えなくなる（合意済み。iOS側の対応は別途
-     後日行う）。
+### 0-1. Publishable keyの取得
+
+- Supabaseは2025年に新しいAPIキー体系（Publishable key / Secret key）を
+  導入しており、旧来の `anon` / `service_role` キー（JWT形式）は
+  2026年末までに廃止予定。新規実装では新形式を使う。
+- `Secret key`（全権限、`sb_secret_...`）ではなく `Publishable key`
+  （公開用、`sb_publishable_...`、旧`anon`キーと同等の低権限）を使う。
+- Project Settings → API Keys →「Publishable key」から取得する。
+- RLSポリシーの働き方は旧`anon`キーと同じ（後述の通り、本アプリでは
+  `authenticated`ロール向けに絞る）。
+
+### 0-2. 認証設定・招待ユーザーの登録（Supabase Auth）
+
+- [ ] Authentication → Sign in / Providers → Email で、一般ユーザーの
+      自己サインアップ（**Allow new users to sign up**）を**無効化**する
+      （アプリ内には登録UIを作らない。招待された人だけがログインできる）
+- [ ] Authentication → URL Configuration → **Redirect URLs** に、
+      本番URL（例: `https://xxxx.pages.dev`）とローカル開発URL
+      （例: `http://localhost:5173`）を登録する
+      （マジックリンクのコールバック先として必須）
+- [ ] Authentication → Users →「**Invite user**」で、クラウド機能を
+      使わせたい人（自分自身も含む）のメールアドレスを個別に登録する
+      （招待メールにマジックリンクが届く）
+
+### 0-3. RLSポリシーの設定（`anon` → `authenticated`）
+
+クラウド保存・読み込みは招待ユーザー限定の機能のため（spec.txt 19章）、
+`route_files`テーブル・`gpx_routes`バケットへのアクセスを、
+**ログイン済み（`authenticated`ロール）のみ**に絞る。
+
+- [ ] 既存の`anon`ロール向けポリシー（今まで「誰でも読み書き可」にしていたもの）
+      を削除する（Database → Policies、または Storage → gpx_routes → Policies
+      の画面からGUIで削除するか、SQL Editorで`drop policy`を実行する）
+- [ ] 代わりに、以下の`authenticated`ロール向けポリシーを作成する
+      （SQL Editorで実行する場合の例。テーブル名・カラム名は
+      spec.txt 17-5章のスキーマに準拠）:
+
+  ```sql
+  -- route_files テーブル
+  create policy "authenticated can insert route_files"
+    on route_files for insert
+    to authenticated
+    with check (true);
+
+  create policy "authenticated can select route_files"
+    on route_files for select
+    to authenticated
+    using (true);
+
+  -- gpx_routes ストレージバケット（storage.objects に対するポリシー）
+  create policy "authenticated can upload gpx_routes"
+    on storage.objects for insert
+    to authenticated
+    with check (bucket_id = 'gpx_routes');
+
+  create policy "authenticated can download gpx_routes"
+    on storage.objects for select
+    to authenticated
+    using (bucket_id = 'gpx_routes');
+  ```
+
+- [ ] 設定後、**未ログイン状態でアプリからルート一覧取得・保存が
+      失敗する**（＝anonでは弾かれる）ことを確認する。これが4章の
+      チェックリストの「未ログイン状態でグレーアウト」に加えて、
+      バックエンド側でも正しくブロックされている証拠になる
+
+【注意】この設定変更により、同一Supabaseプロジェクトをanonキーで
+読み書きしているiOSアプリ（`ios/`）は、Supabase Auth対応するまで
+一時的にクラウド機能が使えなくなる（合意済み。iOS側の対応は別途
+後日行う）。
 
 ## 1. Cloudflare Pagesプロジェクトの作成
 
@@ -94,5 +134,5 @@ pushで自動的に再デプロイされる（Cloudflare Pagesの標準動作）
 - [ ] ログアウト操作でログイン状態が解除され、再度クラウド機能がグレーアウトされる
 - [ ] 「↩ 編集を破棄して戻る」→ 破棄確認 → スタート画面に戻る
 
-Supabase関連の項目が失敗する場合は、まず0.の招待ユーザー登録・
-authenticatedロールのRLS設定を再確認する。
+Supabase関連の項目が失敗する場合は、まず0-2の招待ユーザー登録・
+0-3のauthenticatedロールRLS設定を再確認する。

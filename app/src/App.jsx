@@ -10,6 +10,7 @@ import StartModal from './components/StartModal.jsx'
 import DiscardConfirmModal from './components/DiscardConfirmModal.jsx'
 import { useElevationBackground } from './hooks/useElevationBackground.js'
 import { useMapMatching } from './hooks/useMapMatching.js'
+import { useAuth } from './hooks/useAuth.js'
 import { parseGpx } from './lib/gpx.js'
 import { haversine } from './lib/geo.js'
 import { combineTurnName, detectTurns, wptStyle } from './lib/turns.js'
@@ -44,6 +45,8 @@ function App() {
   const mapViewRef = useRef(null)
   const { status: eleStatus, retryFailed: retryEleFailed } = useElevationBackground(state.routePoints, dispatch)
   const { state: mapMatchState, run: runMapMatching, cancel: cancelMapMatching } = useMapMatching()
+  const { user, sendMagicLink, signOut } = useAuth()
+  const isLoggedIn = Boolean(user)
 
   // spec.txt 6章・11章・12章: wptを含まないGPXの読込時に、全区間のターン自動検出
   // ＋交差点名取得を行う（非同期のOverpass呼び出しを伴うためreducerの外で行う）
@@ -326,6 +329,10 @@ function App() {
           onFileChange={handleFileChange}
           onOpenNetworkPicker={() => setShowNetworkDialog(true)}
           onNewRoute={handleNewRoute}
+          isLoggedIn={isLoggedIn}
+          userEmail={user?.email ?? null}
+          onSendMagicLink={sendMagicLink}
+          onSignOut={signOut}
         />
       )}
       <div className="toolbar">
@@ -354,7 +361,11 @@ function App() {
       )}
       <MapMatchingDialog state={mapMatchState} onCancel={cancelMapMatching} />
       {showNetworkDialog && (
-        <NetworkPickerDialog onCancel={() => setShowNetworkDialog(false)} onLoaded={handleNetworkLoaded} />
+        <NetworkPickerDialog
+          onCancel={() => setShowNetworkDialog(false)}
+          onLoaded={handleNetworkLoaded}
+          isLoggedIn={isLoggedIn}
+        />
       )}
       {showSaveDialog && (
         <SaveDialog
@@ -368,6 +379,7 @@ function App() {
           totalDistKm={totalDistKm}
           gainM={gainM}
           onClose={() => setShowSaveDialog(false)}
+          isLoggedIn={isLoggedIn}
         />
       )}
       <div className="main-area">

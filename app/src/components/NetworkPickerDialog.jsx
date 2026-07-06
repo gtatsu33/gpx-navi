@@ -11,7 +11,7 @@ function fmtGain(r) {
 /**
  * ネットワークから読み込むダイアログ。spec.txt 3-3章。
  */
-export default function NetworkPickerDialog({ onCancel, onLoaded }) {
+export default function NetworkPickerDialog({ onCancel, onLoaded, isLoggedIn }) {
   const [routes, setRoutes] = useState(null)
   const [error, setError] = useState(null)
   const [selectedIdx, setSelectedIdx] = useState(null)
@@ -19,6 +19,10 @@ export default function NetworkPickerDialog({ onCancel, onLoaded }) {
   const [downloadError, setDownloadError] = useState(null)
 
   useEffect(() => {
+    // spec.txt 19章: 招待ユーザー限定機能。isLoggedInがfalseでこのダイアログが
+    // 開かれることは通常無い（呼び出し元のボタンが無効化されているため）が、
+    // 念のための防御的分岐。
+    if (!isLoggedIn) return undefined
     let cancelled = false
     listRoutes().then((result) => {
       if (cancelled) return
@@ -31,7 +35,7 @@ export default function NetworkPickerDialog({ onCancel, onLoaded }) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [isLoggedIn])
 
   async function handleLoad() {
     if (selectedIdx === null) return
@@ -54,9 +58,10 @@ export default function NetworkPickerDialog({ onCancel, onLoaded }) {
       <div className="modal-box network-picker">
         <h3>☁️ ネットワークから読み込む</h3>
 
-        {error && <p className="error">取得に失敗しました: {error}</p>}
-        {!error && routes === null && <p>ルート一覧を取得中…</p>}
-        {!error && routes && routes.length === 0 && <p>ネットワーク上にルートがありません。</p>}
+        {!isLoggedIn && <p className="error">招待ユーザー限定の機能です。ログインしてください。</p>}
+        {isLoggedIn && error && <p className="error">取得に失敗しました: {error}</p>}
+        {isLoggedIn && !error && routes === null && <p>ルート一覧を取得中…</p>}
+        {isLoggedIn && !error && routes && routes.length === 0 && <p>ネットワーク上にルートがありません。</p>}
 
         {!error && routes && routes.length > 0 && (
           <ul className="network-route-list">
