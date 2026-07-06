@@ -143,7 +143,7 @@
       padding: 10px 14px;
       flex-shrink: 0;
     }
-    .ctrl-btn { background: var(--border); color: var(--text); border: none; border-radius: 9px; padding: 10px 12px; font-size: 14px; font-family: var(--font-jp); cursor: pointer; white-space: nowrap; }
+    .ctrl-btn { background: transparent; color: var(--text); border: 1px solid var(--accent); border-radius: 9px; padding: 10px 12px; font-size: 14px; font-family: var(--font-jp); cursor: pointer; white-space: nowrap; }
     .ctrl-btn:active { opacity: 0.7; }
     #btn-voice.muted { color: var(--muted); }
     #nav-status { flex: 1; text-align: right; font-size: 12px; color: var(--muted); font-family: var(--font-num); }
@@ -185,7 +185,7 @@
     .info-row { text-align: center; line-height: 1.1; }
     .info-lbl { font-size: 9px; color: #888; font-family: var(--font-jp); }
     .info-val { font-family: var(--font-num); font-size: 21px; font-weight: 700; color: var(--text); }
-    #btn-grade.grade-on { background: #1a3a2a; color: var(--go); border: 1px solid var(--go); }
+    #btn-grade.grade-on { background: #0d2e38; color: var(--accent); border: 1px solid var(--accent); }
 
     /* ══ NETWORK MODAL ══ */
     #network-modal { display: none; position: fixed; inset: 0; z-index: 2000; }
@@ -1248,7 +1248,7 @@ async function handleSendMagicLink() {
   btn.textContent = '送信中…';
   const { error } = await sbClient.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: window.location.origin },
+    options: { emailRedirectTo: window.location.origin + window.location.pathname },
   });
   btn.disabled = false;
   btn.textContent = 'ログインリンクを送る';
