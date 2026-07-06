@@ -7,7 +7,7 @@ GitHub Pages配信（リポジトリ直下の `index.html`、gpx-navi本体ア�
 ## 0. 前提: Supabase側の準備（必須）
 
 デプロイ前に、Supabaseダッシュボードで以下を必ず済ませておくこと
-（implement.txt 13章「重要・要対応」）。
+（implement.txt 13章）。
 
 1. **Publishable keyの取得**
    - Supabaseは2025年に新しいAPIキー体系（Publishable key / Secret key）を
@@ -18,14 +18,27 @@ GitHub Pages配信（リポジトリ直下の `index.html`、gpx-navi本体ア�
    - Publishable keyは Supabaseダッシュボード → Project Settings →
      API Keys →「Publishable key」から取得する。
    - RLSポリシーの働き方は旧`anon`キーと同じ。
-2. **RLSポリシーの設定**
-   - `route_files` テーブル: 匿名ユーザー（`anon` ロール）による
-     `INSERT` / `SELECT` を許可するポリシーを作成する。
-   - `gpx_routes` ストレージバケット: 匿名ユーザーによる
+2. **招待ユーザーの登録（Supabase Auth、spec.txt 19章）**
+   - Authentication → Sign in / Providers → Email で、一般ユーザーの
+     自己サインアップ（Allow new users to sign up）を無効化する。
+   - Authentication → Users →「Invite user」で、クラウド機能を使わせたい
+     友人のメールアドレスを個別に登録する（マジックリンクが届く）。
+   - Authentication → URL Configuration → Redirect URLs に、本番URL
+     （例: `https://xxxx.pages.dev`）とローカル開発URL
+     （例: `http://localhost:5173`）を登録する。
+3. **RLSポリシーの設定**
+   - `route_files` テーブル: `authenticated` ロールによる
+     `INSERT` / `SELECT` を許可するポリシーを作成する
+     （`anon`ロールへの許可は行わない）。
+   - `gpx_routes` ストレージバケット: `authenticated` ロールによる
      `upload` / `download` を許可するポリシーを作成する。
-   - 本アプリはspec.txt通り無認証前提のため、対象を絞った許可（誰でも
-     読み書き可）にする。ブロックしたままだとアプリから保存・一覧取得が
-     一切できない。
+   - クラウド保存・読み込みは招待ユーザー限定の機能とするため
+     （spec.txt 19章）、ログイン済み（authenticated）ユーザーのみに
+     絞る。ブロックしたままだと招待ユーザーもクラウド機能を使えない。
+   - 【注意】この設定変更により、同一Supabaseプロジェクトをanonキーで
+     読み書きしているiOSアプリ（`ios/`）は、Supabase Auth対応するまで
+     一時的にクラウド機能が使えなくなる（合意済み。iOS側の対応は別途
+     後日行う）。
 
 ## 1. Cloudflare Pagesプロジェクトの作成
 
@@ -71,8 +84,15 @@ pushで自動的に再デプロイされる（Cloudflare Pagesの標準動作）
 - [ ] ターンポイント検出・名称編集・削除
 - [ ] 標高グラフの表示・ホバー連動
 - [ ] 「💾 ルートを保存」→ 標高整合性チェック → ダウンロード
-- [ ] 「☁️ クラウドに保存」チェック → Supabaseへのアップロード成功
-- [ ] 「🔍 ルートを選ぶ」→ ネットワークからの一覧取得・ダウンロード成功
+- [ ] 未ログイン状態で「☁️ クラウドからルートを選ぶ」「☁️ クラウドにも保存」が
+      グレーアウトされ、ツールチップ（「招待ユーザー限定の機能です」等）が
+      表示される
+- [ ] スタート画面の⚙️アイコンから、招待済みメールアドレスでログインリンクを
+      受け取り、クリックしてログインできる
+- [ ] ログイン後、「☁️ クラウドに保存」チェック → Supabaseへのアップロード成功
+- [ ] ログイン後、「🔍 ルートを選ぶ」→ ネットワークからの一覧取得・ダウンロード成功
+- [ ] ログアウト操作でログイン状態が解除され、再度クラウド機能がグレーアウトされる
 - [ ] 「↩ 編集を破棄して戻る」→ 破棄確認 → スタート画面に戻る
 
-Supabase関連の項目が失敗する場合は、まず0.のanonキー・RLS設定を再確認する。
+Supabase関連の項目が失敗する場合は、まず0.の招待ユーザー登録・
+authenticatedロールのRLS設定を再確認する。

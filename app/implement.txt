@@ -466,6 +466,67 @@ check_api_status.py の実測でも「ユニーク座標はCDNキャッシュを
   download_gpx と同じ関数群・同じエラー種別判定（重複エラーの検出等）を
   移植する。
 
+────────────────────────────────────────
+招待制認証（Supabase Auth マジックリンク）の実装方針
+────────────────────────────────────────
+
+spec.txt 19章の「招待制クラウド機能」を、Supabase Authのマジックリンク
+（パスワードレス、メール内リンククリックでログイン）で実現する。
+
+  - Supabase側の設定（ダッシュボード作業。コード側では対応しない）:
+    - Authentication → Sign in / Providers → Email: 一般ユーザーの
+      自己サインアップ（Allow new users to sign up）を無効化する
+    - Authentication → Users →「Invite user」で、招待したい友人の
+      メールアドレスを個別に登録する（アプリ内には登録UIを作らない）
+    - Authentication → URL Configuration → Redirect URLs に、本番URL
+      （Cloudflare Pages）とローカル開発URL（例: http://localhost:5173）
+      を登録する（マジックリンクのコールバック用）
+    - RLSポリシーを、route_filesテーブルのINSERT/SELECT、gpx_routes
+      バケットのupload/downloadともに、`anon`ロール許可から
+      `authenticated`ロール許可（auth.uid() IS NOT NULL）に変更する
+      【重要・要対応】この変更により、同一Supabaseプロジェクトを
+      anonキーで読み書きしているiOSアプリ（ios/）は、Supabase Auth
+      対応するまで一時的にクラウド機能が使えなくなる（合意済み、
+      iOS側の対応は別途後日行う）
+
+  - lib/supabase.js に追加する関数:
+    - sendMagicLink(email): supabase.auth.signInWithOtp({ email }) を
+      呼び出す。emailRedirectToには現在のorigin
+      （window.location.origin）を指定する
+    - getSession() / onAuthStateChange(callback): 現在のセッション取得と
+      変化の購読
+    - signOut(): supabase.auth.signOut()
+
+  - 新規 hooks/useAuth.js:
+    - session/userとloadingを状態として持ち、マウント時に
+      supabase.auth.getSession()で初期状態を取得後、
+      onAuthStateChangeを購読する
+    - マジックリンククリック後のコールバック（URLに含まれるトークン）は
+      supabase-jsの標準機能（detectSessionInUrl、デフォルト有効）が
+      自動的に処理するため、専用のコールバックページ・ルーティングは
+      不要（同一SPAのURLにそのままリダイレクトされれば良い）
+    - { user, loading, sendMagicLink, signOut } を返す
+
+  - App.jsx: useAuth()を呼び出し、isLoggedIn相当の値をStartModal・
+    SaveDialogにpropsで渡す
+
+  - StartModal.jsx: 右上に⚙️アイコンを追加する（spec.txt 3-4章）。
+    クリックでポップオーバーを開閉する:
+    - 未ログイン時: メールアドレス入力欄＋「ログインリンクを送る」
+      ボタン。送信後は「メールを確認してください」等のメッセージを表示する
+    - ログイン中: ログイン中のメールアドレス表示＋「ログアウト」ボタン
+    「☁️ クラウドからルートを選ぶ」ボタンは、isLoggedInがfalseの間
+    disabled属性を付与し、title属性またはツールチップで
+    「招待ユーザー限定の機能です」と案内する
+
+  - SaveDialog.jsx:「☁️ クラウドにも保存」チェックボックスのdisabled条件に
+    既存の`!isSupabaseConfigured()`へ`|| !isLoggedIn`を追加する。ラベル脇の
+    注記も、未設定時のメッセージと未ログイン時のメッセージを出し分ける
+
+  - NetworkPickerDialog.jsx: 念のため、isLoggedInがfalseの場合は
+    開かれても即座にエラー表示して閉じる導線を用意する（App.jsx側で
+    そもそも開かせない実装になっていれば通常到達しない防御的分岐）
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 14. 外部API呼び出し共通方針

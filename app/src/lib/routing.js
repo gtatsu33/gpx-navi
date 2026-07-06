@@ -1,6 +1,6 @@
 import { fetchWithTimeout } from './http.js'
 
-const OSRM_BASE = 'http://router.project-osrm.org/route/v1/bike'
+const OSRM_BASE = 'https://router.project-osrm.org/route/v1/bike'
 
 /**
  * 複数点を経由する道路沿いtrkpt列を返す。OSRM公開APIを使用。
