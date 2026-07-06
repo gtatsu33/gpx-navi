@@ -162,7 +162,7 @@ export default function SaveDialog({
               </label>
               <p className="save-filename-preview">保存ファイル名: {filename}_gne.gpx</p>
 
-              <label>
+              <label className={!isSupabaseConfigured() || !isLoggedIn ? 'save-dialog-label-disabled' : undefined}>
                 <input
                   type="checkbox"
                   checked={uploadToCloud}

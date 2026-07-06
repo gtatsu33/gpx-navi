@@ -196,6 +196,10 @@ button.btn-danger.btn-icon:hover:not(:disabled) {
   margin: 8px 0;
 }
 
+.save-dialog-label-disabled {
+  color: #9ca3af;
+}
+
 .save-dialog input[type='text'] {
   margin-left: 8px;
 }
