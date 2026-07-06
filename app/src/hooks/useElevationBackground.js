@@ -63,12 +63,23 @@ export function useElevationBackground(routePoints, dispatch) {
     }
 
     const targets = []
+    const cachedAssignments = []
     rp.forEach((p, i) => {
       if (hasOwnElevation(p)) return
       if (p.eleFix !== null) return
-      if (cacheRef.current.has(coordKey(p.lat, p.lon))) return
+      const key = coordKey(p.lat, p.lon)
+      if (cacheRef.current.has(key)) {
+        // 別の点として既に取得済みの座標と一致する場合、その値をこの点にも反映する
+        // （implement.txt 2-2章の「同一座標の結果を再利用する」を実際に適用する）
+        cachedAssignments.push({ trkptIndex: i, value: cacheRef.current.get(key) })
+        return
+      }
       targets.push(i)
     })
+
+    if (cachedAssignments.length) {
+      dispatch({ type: 'SET_ELE_FIX_BATCH', payload: { assignments: cachedAssignments } })
+    }
 
     if (!targets.length) {
       maybeFinalize()
@@ -90,7 +101,6 @@ export function useElevationBackground(routePoints, dispatch) {
         if (!p || hasOwnElevation(p) || p.eleFix !== null) continue
         const value = await fetchElevationWithRetry(p.lat, p.lon)
         breakerRef.current.recordResult(value !== null)
-        cacheRef.current.set(coordKey(p.lat, p.lon), value)
         if (value === null) unavailableCount += 1
         results.push({ index: idx, lat: p.lat, lon: p.lon, value })
         doneCount += 1
@@ -105,9 +115,15 @@ export function useElevationBackground(routePoints, dispatch) {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker))
 
     const rpNow = routePointsRef.current
-    const assignments = results
-      .filter((r) => rpNow[r.index] && rpNow[r.index].lat === r.lat && rpNow[r.index].lon === r.lon)
-      .map((r) => ({ trkptIndex: r.index, value: r.value }))
+    const assignments = []
+    results.forEach((r) => {
+      // ルート編集で対象点がずれた/消えた場合はキャッシュにも書き込まない
+      // （書き込んでしまうと、同じ座標の点が二度と再取得されなくなる）
+      if (rpNow[r.index] && rpNow[r.index].lat === r.lat && rpNow[r.index].lon === r.lon) {
+        cacheRef.current.set(coordKey(r.lat, r.lon), r.value)
+        assignments.push({ trkptIndex: r.index, value: r.value })
+      }
+    })
     if (assignments.length) {
       dispatch({ type: 'SET_ELE_FIX_BATCH', payload: { assignments } })
     }
