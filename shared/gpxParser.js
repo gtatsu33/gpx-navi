@@ -12,7 +12,8 @@ function parseGPX(text) {
   };
   const getText = (p, t) => { const el = getEls(p, t)[0]; return el ? el.textContent.trim() : ''; };
 
-  const name = getText(doc, 'name') || getText(doc, 'n') || 'ルート';
+  const trkEl = getEls(doc, 'trk')[0];
+  const name = (trkEl && (getText(trkEl, 'name') || getText(trkEl, 'n'))) || 'ルート';
 
   const track = [];
   let prevKey = null;
