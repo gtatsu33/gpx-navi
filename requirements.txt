@@ -1,9 +1,0 @@
-streamlit>=1.32.0
-gpxpy>=1.6.2
-folium>=0.16.0
-streamlit-folium>=0.20.0
-numpy>=1.26.0
-requests>=2.31.0
-rdp>=0.8
-plotly>=5.0.0
-supabase>=2.0.0
