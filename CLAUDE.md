@@ -9,12 +9,10 @@
 - 今現在のStable版について、仕様や呼び出し規約をネット上で確実に調査してから仕様に落とし、実装すること。あなたの知識内にある情報を鵜吞みにしないこと。
 
 ## バージョン管理
-- Python/Streamlit版: `APP_VERSION` は `gpxconverter.py` の先頭に定義する
-- HTML+JS版（gpx-editor）: `APP_VERSION` は `app/src/constants.js` に定義する
-  （Python版とは別建ての独立したバージョン系列。2026-07-05時点で1.0.0）
 - HTML+JS版（gpx-navi、ナビ本体）: `APP_VERSION` は `index.html` 内の
-  `<script>`先頭に定義する（Python版・gpx-editor版とは別建ての独立した
-  バージョン系列。2026-07-06時点で1.0.0）
+  `<script>`先頭に定義する（独立したバージョン系列。2026-07-06時点で1.0.0）
+- HTML+JS版（gpx-editor）は 2026-07-09 に別リポジトリ（gpx-editor）へ分離。
+  バージョン管理ルールはそちらの CLAUDE.md を参照。
 - いずれの版でもコード変更を行った際は、以下のルールで `APP_VERSION` を更新すること
   - パッチ（x.y.**Z**）：バグ修正・細かい調整
   - マイナー（x.**Y**.0）：新機能追加
