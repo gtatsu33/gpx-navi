@@ -17,7 +17,6 @@ ramen_photos/
 .claude/
 
 .env
-config.js
 
 ios/.env
 
