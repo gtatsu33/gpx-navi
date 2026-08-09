@@ -1,7 +1,7 @@
 // GPX ナビ Service Worker
 // アプリシェルとマップタイルをキャッシュしてオフライン動作を実現する
 
-const SHELL_CACHE = 'gpxnav-shell-v5';
+const SHELL_CACHE = 'gpxnav-shell-v6';
 const TILE_CACHE  = 'gpxnav-tiles-v1';
 
 const SHELL_ASSETS = [
@@ -17,10 +17,20 @@ const SHELL_ASSETS = [
 ];
 
 // ── インストール: アプリシェルをキャッシュ ──
+// Safari は「redirected」フラグが付いた Response をナビゲーション用に
+// キャッシュから返すことを拒否する（「Response served by service worker
+// has redirections」エラー）ため、cache.addAll() は使わず、各アセットを
+// 個別に取得してリダイレクト情報を持たない Response に作り直してから保存する。
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(SHELL_CACHE)
-      .then(cache => cache.addAll(SHELL_ASSETS).catch(() => {}))
+      .then(cache => Promise.all(
+        SHELL_ASSETS.map(url =>
+          fetch(url)
+            .then(response => cache.put(url, stripRedirect(response)))
+            .catch(() => {})
+        )
+      ))
       .then(() => self.skipWaiting())
   );
 });
@@ -92,11 +102,23 @@ async function cacheFirst(request, cacheName) {
 
   try {
     const response = await fetch(request);
-    if (response.ok) {
-      cache.put(request, response.clone());
-    }
-    return response;
+    if (!response.ok) return response;
+    const clean = await stripRedirect(response);
+    cache.put(request, clean.clone());
+    return clean;
   } catch {
     return new Response('Offline', { status: 503 });
   }
+}
+
+// リダイレクトを経由した Response から redirected フラグを取り除いた
+// プレーンな Response を作る（Safari 対策）。リダイレクトがなければそのまま返す。
+async function stripRedirect(response) {
+  if (!response.redirected) return response;
+  const body = await response.blob();
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
